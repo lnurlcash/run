@@ -1,6 +1,6 @@
 [package]
 name = "lnurlcash-run"
-# the git tag is the version, as in lnurl-mint-rust
+# placeholder: release.yml stamps the version from the git tag at release time
 version = "0.0.0"
 edition = "2024"
 description = "run.lnurlcash.com: hosted, self-managing LNURLcash mints. For now: the landing page and its nostr beta sign-up."

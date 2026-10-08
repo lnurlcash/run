@@ -49,8 +49,9 @@ lnurlcash-run export        # JSON lines: npub, verified, note, created_at
 make dev                    # http://127.0.0.1:8200, PUBLIC_URL set to match
 make check test
 make e2e                    # the page in headless Chromium: sign-up, approval, provisioning
-make build                  # docker image lnurlcash-run
-docker run -d -p 8200:8200 -v run-data:/data lnurlcash-run
+make build                  # docker image lnurlcash/lnurlcash-run
+make run                    # (re)starts it on 127.0.0.1:8200, state in ./data, settings from .env
+make release VERSION=0.1.0  # tags v0.1.0; CI builds and pushes :0.1.0, :0.1, :0, :latest
 ```
 
 | Variable | Default | |

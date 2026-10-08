@@ -7,6 +7,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:trixie-slim
 COPY --from=builder /usr/local/bin/lnurlcash-run /usr/local/bin/
+# provisioning clones and pushes the gitops repo with the git CLI
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 1000 run \
     && useradd --uid 1000 --gid run --no-create-home --shell /usr/sbin/nologin run \
     && mkdir /data && chown run:run /data
