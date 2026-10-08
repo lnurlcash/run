@@ -1,0 +1,31 @@
+[package]
+name = "lnurlcash-run"
+# the git tag is the version, as in lnurl-mint-rust
+version = "0.0.0"
+edition = "2024"
+description = "run.lnurlcash.com: hosted, self-managing LNURLcash mints. For now: the landing page and its nostr beta sign-up."
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+bech32 = "0.11"
+clap = { version = "4", features = ["derive", "env"] }
+env_logger = "0.11"
+hex = "0.4"
+log = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+secp256k1 = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+[profile.release]
+lto = true
+strip = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

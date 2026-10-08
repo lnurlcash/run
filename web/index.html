@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LNURLcash Run — your own mint, running itself</title>
+<meta name="description" content="Hosted LNURLcash mints that manage themselves: each one its own Lightning node, provisioned from a git commit, kept liquid by LSPS2, synced from electrs over Bitcoin Core. Join the beta with nostr.">
+<meta property="og:title" content="LNURLcash Run — your own mint, running itself">
+<meta property="og:description" content="A hosted LNURLcash mint with its own Lightning node, LSPS2 liquidity and an electrs chain backend. Private beta: sign in with nostr.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,340;9..144,440;9..144,560;9..144,650&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="nav__inner">
+    <a class="nav__mark" href="#main" aria-label="LNURLcash Run, top of page">
+      <span class="nav__mark-lnurl">LNURL</span><span class="nav__mark-cash">CASH</span><span class="nav__mark-run">RUN</span>
+    </a>
+    <nav class="nav__links" aria-label="Sections">
+      <a class="nav__link" href="#gitops">Provisioning</a>
+      <a class="nav__link" href="#liquidity">Liquidity</a>
+      <a class="nav__link" href="#chain">Chain</a>
+      <a class="nav__link" href="#ownership">Ownership</a>
+      <a class="btn btn--small" href="#beta">Join the beta</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============================== hero ============================== -->
+  <section class="hero">
+    <div class="hero__copy">
+      <p class="eyebrow"><i class="pulse" aria-hidden="true"></i> PRIVATE BETA · RUN.LNURLCASH.COM</p>
+      <h1 class="hero__title">Your own LNURLcash mint.<br><em>It runs itself.</em></h1>
+      <p class="hero__sub">
+        A hosted <a href="https://github.com/lnurlcash/lnurl-mint-rust" target="_blank" rel="noopener">lnurl-mint</a> with a
+        Lightning node of its own. It is provisioned from a git commit, its liquidity comes from LSPS2, and it syncs
+        from our electrs index over Bitcoin Core. There is no node to babysit, no channels to juggle and no
+        <code>bitcoind</code> to run. You get a Lightning Address that mints bearer notes, plus the admin keys to it.
+      </p>
+      <div class="hero__actions">
+        <a class="btn btn--primary" href="#beta">Join the beta with Nostr <span aria-hidden="true">→</span></a>
+        <p class="hero__note">You sign in with your nostr key: no email, no password. <span class="counter" data-count hidden><b data-count-value>0</b> on the list</span></p>
+      </div>
+    </div>
+
+    <figure class="plate" aria-label="Illustration of a running mint's status">
+      <div class="plate__corner plate__corner--tl" aria-hidden="true"></div>
+      <div class="plate__corner plate__corner--tr" aria-hidden="true"></div>
+      <div class="plate__corner plate__corner--bl" aria-hidden="true"></div>
+      <div class="plate__corner plate__corner--br" aria-hidden="true"></div>
+      <div class="plate__head">
+        <span class="plate__host">satoshi.run.lnurlcash.com</span>
+        <span class="pill pill--ok"><i class="pulse" aria-hidden="true"></i>running</span>
+      </div>
+      <dl class="plate__rows">
+        <div class="plate__row">
+          <dt>lightning</dt>
+          <dd><span class="ok">ready</span> · own node, ldk-node</dd>
+        </div>
+        <div class="plate__row">
+          <dt>inbound</dt>
+          <dd>
+            <span class="bar" aria-hidden="true"><span class="bar__fill"></span></span>
+            <span class="muted">LSPS2 · topped up on demand</span>
+          </dd>
+        </div>
+        <div class="plate__row">
+          <dt>chain</dt>
+          <dd>electrs · Bitcoin Core · <span class="ok">synced</span></dd>
+        </div>
+        <div class="plate__row">
+          <dt>config</dt>
+          <dd><code>mints/satoshi.yaml</code> · <span class="hash">a3f9c1e</span></dd>
+        </div>
+        <div class="plate__row">
+          <dt>address</dt>
+          <dd>mint@satoshi.run.lnurlcash.com</dd>
+        </div>
+      </dl>
+      <figcaption class="plate__caption">Illustration · what a beta mint reports</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================== steps ============================== -->
+  <section class="steps" aria-labelledby="steps-heading">
+    <h2 class="visually-hidden" id="steps-heading">How it starts</h2>
+    <ol class="steps__list">
+      <li class="steps__item reveal">
+        <span class="steps__num">01</span>
+        <h3>Sign in with nostr</h3>
+        <p>Your npub is your account. There is nothing to remember and nothing to leak.</p>
+      </li>
+      <li class="steps__item reveal">
+        <span class="steps__num">02</span>
+        <h3>A commit becomes a mint</h3>
+        <p>Run writes your mint's manifest to git. Argo CD rolls it out to Kubernetes, with TLS, in minutes.</p>
+      </li>
+      <li class="steps__item reveal">
+        <span class="steps__num">03</span>
+        <h3>Share your address</h3>
+        <p>Anyone who pays it gets a programmable bearer note. Rotate, split, merge and melt work from day one.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============================== gitops ============================== -->
+  <section class="split" id="gitops" aria-labelledby="gitops-heading">
+    <div class="split__copy reveal">
+      <p class="eyebrow eyebrow--static">01 · PROVISIONED BY A COMMIT</p>
+      <h2 id="gitops-heading">Every mint is a file in a git repository.</h2>
+      <p>
+        Run doesn't click through a cloud console. It changes a git repository of Kubernetes configuration, and
+        Argo CD makes the cluster match. A new mint is one commit. A new version, a new fee or a new domain is one
+        more.
+      </p>
+      <ul class="ticks">
+        <li><b>Auditable.</b> The history of your mint is <code>git log</code>.</li>
+        <li><b>Reversible.</b> A bad change is a revert, rolled back like any other.</li>
+        <li><b>Readable.</b> Your mint's whole configuration is one small file, and you can see it.</li>
+        <li><b>Isolated.</b> Each mint gets its own StatefulSet, volume, keys and node.</li>
+      </ul>
+    </div>
+    <div class="split__visual reveal">
+      <div class="code" role="img" aria-label="A git commit adding a mint's manifest">
+        <div class="code__bar"><span></span><span></span><span></span><b>commit a3f9c1e · run: provision satoshi</b></div>
+<pre><span class="c-dim">--- /dev/null</span>
+<span class="c-dim">+++ mints/satoshi.yaml</span>
+<span class="c-add">+apiVersion: run.lnurlcash.com/v1</span>
+<span class="c-add">+kind: Mint</span>
+<span class="c-add">+metadata:</span>
+<span class="c-add">+  name: satoshi</span>
+<span class="c-add">+  owner: npub1sat0shi…q9x</span>
+<span class="c-add">+spec:</span>
+<span class="c-add">+  image: lnurlcash/lnurl-mint-rust:0.1</span>
+<span class="c-add">+  domain: satoshi.run.lnurlcash.com</span>
+<span class="c-add">+  network: bitcoin</span>
+<span class="c-add">+  chain: electrs</span>
+<span class="c-add">+  liquidity:</span>
+<span class="c-add">+    lsp: lsps2</span>
+<span class="c-add">+    maxOpeningFeePpm: 10000</span>
+<span class="c-add">+  fees:</span>
+<span class="c-add">+    baseMsat: 1000</span>
+<span class="c-add">+    ppm: 0</span></pre>
+      </div>
+      <ol class="flow" aria-label="From commit to running mint">
+        <li><b>Run</b><span>writes the commit</span></li>
+        <li><b>git</b><span>the source of truth</span></li>
+        <li><b>Argo CD</b><span>syncs the cluster</span></li>
+        <li><b>Kubernetes</b><span>your mint, live</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============================== liquidity ============================== -->
+  <section class="split split--reverse" id="liquidity" aria-labelledby="liquidity-heading">
+    <div class="split__copy reveal">
+      <p class="eyebrow eyebrow--static">02 · LIQUIDITY THAT MANAGES ITSELF</p>
+      <h2 id="liquidity-heading">Inbound capacity arrives with the first payment.</h2>
+      <p>
+        A new Lightning node can't be paid, because nobody has a channel to it. Run's mints use
+        <b>LSPS2</b>, the open standard for just-in-time channels. When a payment comes in that no channel can
+        carry, the liquidity provider opens one right then and forwards the payment over it. The opening fee
+        comes out of that payment.
+      </p>
+      <ul class="ticks">
+        <li><b>No bootstrap ritual.</b> Your first channel doesn't need on-chain coins or a peer you know.</li>
+        <li><b>Capped fees.</b> Every mint has a ceiling on opening fees, written in its manifest, and quotes are checked against it.</li>
+        <li><b>Grows with demand.</b> Bigger payments bring bigger channels. Idle capacity isn't paid for up front.</li>
+        <li><b>Standard, not proprietary.</b> LSPS2 is supported by ldk-node, and any compliant LSP can be swapped in.</li>
+      </ul>
+    </div>
+    <div class="split__visual reveal">
+      <ol class="timeline" aria-label="A just-in-time channel, step by step">
+        <li class="timeline__item">
+          <span class="timeline__t">t+0s</span>
+          <div><b>A wallet pays your Lightning Address</b><p>The invoice routes to the LSP, which holds the payment.</p></div>
+        </li>
+        <li class="timeline__item">
+          <span class="timeline__t">t+1s</span>
+          <div><b>The LSP opens a channel to your mint</b><p>It is zero-conf and sized to the payment with headroom to spare, and the opening fee is checked against your cap.</p></div>
+        </li>
+        <li class="timeline__item">
+          <span class="timeline__t">t+2s</span>
+          <div><b>The payment is forwarded and claimed</b><p>Your mint claims it, minus the opening fee.</p></div>
+        </li>
+        <li class="timeline__item timeline__item--done">
+          <span class="timeline__t">t+2s</span>
+          <div><b>A note is minted</b><p>The payer holds an LNURLcash bearer note. The channel stays for the next one.</p></div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============================== chain ============================== -->
+  <section class="split" id="chain" aria-labelledby="chain-heading">
+    <div class="split__copy reveal">
+      <p class="eyebrow eyebrow--static">03 · A CHAIN BACKEND YOU DON'T RUN</p>
+      <h2 id="chain-heading">One Bitcoin Core. One electrs. Every mint in sync.</h2>
+      <p>
+        A Lightning node needs to watch the chain: it has to see its channels confirm, catch a cheating
+        counterparty, and sweep closed channels home. Run keeps a fully validating <b>Bitcoin Core</b> node with an
+        <b>electrs</b> index in front of it. Each mint's node syncs from electrs over the Electrum protocol, with
+        nothing to download per mint and no RPC credentials to rotate.
+      </p>
+      <ul class="ticks">
+        <li><b>Fully validating.</b> Bitcoin Core checks every block itself, so no third-party API is trusted.</li>
+        <li><b>Indexed once, served to all.</b> electrs answers every mint's queries in milliseconds.</li>
+        <li><b>Inside the cluster.</b> Chain queries never leave Run's network.</li>
+      </ul>
+    </div>
+    <div class="split__visual reveal">
+      <svg class="diagram" viewBox="0 0 420 300" role="img" aria-labelledby="chain-svg-title">
+        <title id="chain-svg-title">Bitcoin Core feeds electrs, which serves many mints</title>
+        <defs>
+          <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0 0 8 4 0 8z" class="diagram__arrow"/>
+          </marker>
+        </defs>
+        <rect class="diagram__box diagram__box--gold" x="20" y="120" width="110" height="60" rx="3"/>
+        <text class="diagram__label" x="75" y="146" text-anchor="middle">Bitcoin Core</text>
+        <text class="diagram__sub" x="75" y="164" text-anchor="middle">validates</text>
+        <rect class="diagram__box diagram__box--gold" x="165" y="120" width="100" height="60" rx="3"/>
+        <text class="diagram__label" x="215" y="146" text-anchor="middle">electrs</text>
+        <text class="diagram__sub" x="215" y="164" text-anchor="middle">indexes</text>
+        <line class="diagram__line" x1="130" y1="150" x2="163" y2="150" marker-end="url(#arrow)"/>
+        <g class="diagram__mints">
+          <rect class="diagram__box diagram__box--mint" x="310" y="30" width="96" height="44" rx="3"/>
+          <text class="diagram__label diagram__label--small" x="358" y="57" text-anchor="middle">satoshi</text>
+          <rect class="diagram__box diagram__box--mint" x="310" y="96" width="96" height="44" rx="3"/>
+          <text class="diagram__label diagram__label--small" x="358" y="123" text-anchor="middle">meetup-zrh</text>
+          <rect class="diagram__box diagram__box--mint" x="310" y="162" width="96" height="44" rx="3"/>
+          <text class="diagram__label diagram__label--small" x="358" y="189" text-anchor="middle">corner-cafe</text>
+          <rect class="diagram__box diagram__box--mint diagram__box--ghost" x="310" y="228" width="96" height="44" rx="3"/>
+          <text class="diagram__sub" x="358" y="255" text-anchor="middle">yours</text>
+        </g>
+        <path class="diagram__line diagram__line--flow" d="M265 150 C 290 150, 290 52, 308 52" marker-end="url(#arrow)"/>
+        <path class="diagram__line diagram__line--flow" d="M265 150 C 290 150, 290 118, 308 118" marker-end="url(#arrow)"/>
+        <path class="diagram__line diagram__line--flow" d="M265 150 C 290 150, 290 184, 308 184" marker-end="url(#arrow)"/>
+        <path class="diagram__line diagram__line--flow diagram__line--ghost" d="M265 150 C 290 150, 290 250, 308 250" marker-end="url(#arrow)"/>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ============================== self-managing ============================== -->
+  <section class="grid-section" aria-labelledby="ops-heading">
+    <p class="eyebrow eyebrow--static">04 · TOTALLY SELF-MANAGING</p>
+    <h2 id="ops-heading">The operations a node needs, done for you.</h2>
+    <div class="feature-grid">
+      <article class="feature reveal">
+        <h3>Upgrades as commits</h3>
+        <p>A new lnurl-mint release is a version bump in the manifest. Argo CD rolls it out and stops the node gracefully first, so channel state is written before the pod goes.</p>
+      </article>
+      <article class="feature reveal">
+        <h3>Snapshots of node state</h3>
+        <p>Your node's seed, channel monitors and notes live on a persistent volume, and that volume is snapshotted on a schedule. A Lightning node's state is precious, and these backups are designed with that in mind.</p>
+      </article>
+      <article class="feature reveal">
+        <h3>Health that heals</h3>
+        <p>Liveness checks and automatic restarts are built in. On restart the mint reconciles: a pending melt is finished, resent or released, and never guessed at.</p>
+      </article>
+      <article class="feature reveal">
+        <h3>Routing that knows the map</h3>
+        <p>Rapid Gossip Sync loads the Lightning network graph on boot, so melts route from the first minute.</p>
+      </article>
+      <article class="feature reveal">
+        <h3>Your domain, with TLS</h3>
+        <p>Your mint lives at <code>you.run.lnurlcash.com</code>, or on your own domain, with certificates issued and renewed automatically.</p>
+      </article>
+      <article class="feature reveal">
+        <h3>The full admin, still yours</h3>
+        <p>The mint's admin UI and <code>lnurl-mint-cli</code> are included: balances, channels, notes, payouts. Self-managing never means locked out.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============================== ownership ============================== -->
+  <section class="ownership" id="ownership" aria-labelledby="ownership-heading">
+    <div class="ownership__inner reveal">
+      <p class="eyebrow eyebrow--static">05 · YOURS TO LEAVE</p>
+      <h2 id="ownership-heading">No lock-in. It's the same open-source mint.</h2>
+      <p>
+        A Run mint is <a href="https://github.com/lnurlcash/lnurl-mint-rust" target="_blank" rel="noopener">lnurl-mint-rust</a>,
+        unmodified and MIT-licensed. Export its data directory, which holds the seed, the node state and the notes,
+        and start it on your own hardware:
+      </p>
+<pre class="shell"><span class="c-dim">$</span> docker run -d --network host -v ./data:/data --env-file .env \
+    lnurlcash/lnurl-mint-rust</pre>
+      <p class="muted">The same notes. The same node, with its channels open. Only your host changes.</p>
+    </div>
+  </section>
+
+  <!-- ============================== beta ============================== -->
+  <section class="beta" id="beta" aria-labelledby="beta-heading">
+    <div class="beta__panel">
+      <div class="beta__intro">
+        <p class="eyebrow eyebrow--static"><i class="pulse" aria-hidden="true"></i> PRIVATE BETA</p>
+        <h2 id="beta-heading">Get one of the first mints.</h2>
+        <p>
+          We're opening Run to a small group first. Sign in with your nostr key to join the list, and we'll reach
+          you on nostr when your mint is ready.
+        </p>
+        <ul class="ticks ticks--small">
+          <li>Sign-up is a signed nostr event (NIP-98), so we know the key is yours.</li>
+          <li>We store your public key and your note. Nothing else, and no cookies.</li>
+          <li>The beta is free. Pricing comes later, and you'll know it before you're charged.</li>
+        </ul>
+      </div>
+
+      <form class="beta__form" id="beta-form" novalidate>
+        <label class="field">
+          <span class="field__label">What would you run a mint for? <span class="muted">(optional)</span></span>
+          <textarea name="note" rows="3" maxlength="500" placeholder="A meetup, a shop, an event, a community…"></textarea>
+        </label>
+
+        <div class="beta__signer" data-signer>
+          <button class="btn btn--primary btn--wide" type="submit" data-sign>
+            <svg class="btn__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 7v6c0 5 3.8 8.6 9 9 5.2-.4 9-4 9-9V7z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m8.5 12 2.5 2.5 4.5-5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+            Sign in with Nostr &amp; join
+          </button>
+          <p class="beta__hint" data-no-extension hidden>
+            No nostr extension found. Install a NIP-07 signer such as
+            <a href="https://getalby.com" target="_blank" rel="noopener">Alby</a> or
+            <a href="https://github.com/fiatjaf/nos2x" target="_blank" rel="noopener">nos2x</a> and reload, or enter your npub below.
+          </p>
+        </div>
+
+        <details class="beta__fallback" data-fallback>
+          <summary>No extension? Enter your npub instead</summary>
+          <label class="field">
+            <span class="field__label">Your npub</span>
+            <input name="npub" autocomplete="off" spellcheck="false" placeholder="npub1…">
+          </label>
+          <button class="btn btn--ghost" type="button" data-typed>Join with this npub</button>
+          <p class="muted small">Entries made this way are listed as unverified until you sign in once with the key.</p>
+        </details>
+
+        <div class="beta__result" data-result role="status" aria-live="polite" hidden></div>
+
+        <div class="mint-panel" data-mint-panel hidden>
+          <p class="eyebrow eyebrow--static"><i class="pulse" aria-hidden="true"></i> YOU'RE IN</p>
+          <h3>Name your mint</h3>
+          <p class="muted small">It becomes <code><span data-mint-preview>yourname</span>.run.lnurlcash.com</code>, and its Lightning Address is <code>mint@</code> that. Use 3 to 30 characters: a-z, 0-9 and dashes.</p>
+          <div class="mint-panel__row">
+            <input name="mint" autocomplete="off" spellcheck="false" maxlength="30" placeholder="satoshi" aria-label="Mint name" pattern="[a-z0-9][a-z0-9\-]{1,28}[a-z0-9]">
+            <button class="btn btn--primary" type="button" data-create-mint>Sign &amp; create</button>
+          </div>
+          <div class="mint-panel__out" data-mint-out role="status" aria-live="polite"></div>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============================== faq ============================== -->
+  <section class="faq" aria-labelledby="faq-heading">
+    <h2 id="faq-heading">Questions</h2>
+    <details>
+      <summary>Who holds the keys?</summary>
+      <p>During the beta, your mint's node runs on Run's infrastructure, and its seed lives on your mint's own
+        volume there. You run the admin, can export the whole data directory, and can move to your own machine at
+        any time. If you want the seed never to leave your hardware, run lnurl-mint-rust yourself. It's the same
+        software.</p>
+    </details>
+    <details>
+      <summary>Is an LNURLcash mint custodial?</summary>
+      <p>Yes. A bearer note is a claim on the mint that issued it, the way a banknote is a claim on its issuer. That's why
+        the mint is open source, its notes carry certificates, and every spend is checked by Bitcoin Core's own script
+        interpreter. Read the <a href="https://lnurlcash.com" target="_blank" rel="noopener">LNURLcash spec</a> for the
+        details.</p>
+    </details>
+    <details>
+      <summary>Which network?</summary>
+      <p>Bitcoin mainnet, with a signet option for trying things out without real sats.</p>
+    </details>
+    <details>
+      <summary>What does it cost?</summary>
+      <p>The beta is free. There will be a plan for running mints, plus LSPS2 opening fees when your mint needs inbound
+        capacity. Those fees are paid out of incoming payments, never by surprise.</p>
+    </details>
+    <details>
+      <summary>When?</summary>
+      <p>When it's ready, and not before. Lightning nodes hold money, so the beta opens in small batches. Join the list
+        and you'll hear from us on nostr.</p>
+    </details>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer__inner">
+    <span class="nav__mark"><span class="nav__mark-lnurl">LNURL</span><span class="nav__mark-cash">CASH</span><span class="nav__mark-run">RUN</span></span>
+    <nav aria-label="Elsewhere">
+      <a href="https://lnurlcash.com" target="_blank" rel="noopener">lnurlcash.com ↗</a>
+      <a href="https://github.com/lnurlcash/lnurl-mint-rust" target="_blank" rel="noopener">lnurl-mint-rust ↗</a>
+      <a href="https://github.com/lnurl/luds/pull/301" target="_blank" rel="noopener">LUD-25 ↗</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>
