@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LNURLcash Run — your own mint, running itself</title>
-<meta name="description" content="Hosted LNURLcash mints that manage themselves: each one its own Lightning node, provisioned from a git commit, kept liquid by LSPS2, synced from electrs over Bitcoin Core. Join the beta with nostr.">
+<meta name="description" content="Hosted LNURLcash mints that manage themselves: each one its own Lightning node, kept liquid by LSPS2, synced from our full node or any Electrum server. Join the beta with nostr.">
 <meta property="og:title" content="LNURLcash Run — your own mint, running itself">
-<meta property="og:description" content="A hosted LNURLcash mint with its own Lightning node, LSPS2 liquidity and an electrs chain backend. Private beta: sign in with nostr.">
+<meta property="og:description" content="A hosted LNURLcash mint with its own Lightning node, LSPS2 liquidity and chain sync handled for you. Private beta: sign in with nostr.">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,7 +24,7 @@
       <span class="nav__mark-lnurl">LNURL</span><span class="nav__mark-cash">CASH</span><span class="nav__mark-run">RUN</span>
     </a>
     <nav class="nav__links" aria-label="Sections">
-      <a class="nav__link" href="#gitops">Provisioning</a>
+      <a class="nav__link" href="#admin">Admin</a>
       <a class="nav__link" href="#liquidity">Liquidity</a>
       <a class="nav__link" href="#chain">Chain</a>
       <a class="nav__link" href="#ownership">Ownership</a>
@@ -42,9 +42,9 @@
       <h1 class="hero__title">Your own LNURLcash mint.<br><em>It runs itself.</em></h1>
       <p class="hero__sub">
         A hosted <a href="https://github.com/lnurlcash/lnurl-mint-rust" target="_blank" rel="noopener">lnurl-mint</a> with a
-        Lightning node of its own. It is provisioned from a git commit, its liquidity comes from LSPS2, and it syncs
-        from our electrs index over Bitcoin Core. There is no node to babysit, no channels to juggle and no
-        <code>bitcoind</code> to run. You get a Lightning Address that mints bearer notes, plus the admin keys to it.
+        Lightning node of its own. Its liquidity comes from LSPS2, it syncs the chain from our full node or any
+        Electrum server you choose, and you configure it from its admin UI. There is no node to babysit, no channels to juggle and no
+        full node to run. You get a Lightning Address that mints bearer notes, plus the admin keys to it.
       </p>
       <div class="hero__actions">
         <a class="btn btn--primary" href="#beta">Join the beta with Nostr <span aria-hidden="true">→</span></a>
@@ -75,11 +75,11 @@
         </div>
         <div class="plate__row">
           <dt>chain</dt>
-          <dd>electrs · Bitcoin Core · <span class="ok">synced</span></dd>
+          <dd>Run's full node · <span class="ok">synced</span></dd>
         </div>
         <div class="plate__row">
-          <dt>config</dt>
-          <dd><code>mints/satoshi.yaml</code> · <span class="hash">a3f9c1e</span></dd>
+          <dt>admin</dt>
+          <dd>web UI · <code>lnurl-mint-cli</code></dd>
         </div>
         <div class="plate__row">
           <dt>address</dt>
@@ -101,8 +101,8 @@
       </li>
       <li class="steps__item reveal">
         <span class="steps__num">02</span>
-        <h3>A commit becomes a mint</h3>
-        <p>Run writes your mint's manifest to git. Argo CD rolls it out to Kubernetes, with TLS, in minutes.</p>
+        <h3>Name it, and it's live</h3>
+        <p>Run deploys your mint with its own Lightning node and TLS, in minutes.</p>
       </li>
       <li class="steps__item reveal">
         <span class="steps__num">03</span>
@@ -112,51 +112,52 @@
     </ol>
   </section>
 
-  <!-- ============================== gitops ============================== -->
-  <section class="split" id="gitops" aria-labelledby="gitops-heading">
+  <!-- ============================== admin ============================== -->
+  <section class="split" id="admin" aria-labelledby="admin-heading">
     <div class="split__copy reveal">
-      <p class="eyebrow eyebrow--static">01 · PROVISIONED BY A COMMIT</p>
-      <h2 id="gitops-heading">Every mint is a file in a git repository.</h2>
+      <p class="eyebrow eyebrow--static">01 · CONFIGURED FROM YOUR ADMIN</p>
+      <h2 id="admin-heading">Change your mint from its admin page.</h2>
       <p>
-        Run doesn't click through a cloud console. It changes a git repository of Kubernetes configuration, and
-        Argo CD makes the cluster match. A new mint is one commit. A new version, a new fee or a new domain is one
-        more.
+        Fees, the cap on liquidity opening fees, your domain: you set them in your mint's admin UI, and Run rolls
+        the change out for you. There are no config files to edit and no servers to log into.
       </p>
       <ul class="ticks">
-        <li><b>Auditable.</b> The history of your mint is <code>git log</code>.</li>
-        <li><b>Reversible.</b> A bad change is a revert, rolled back like any other.</li>
-        <li><b>Readable.</b> Your mint's whole configuration is one small file, and you can see it.</li>
-        <li><b>Isolated.</b> Each mint gets its own StatefulSet, volume, keys and node.</li>
+        <li><b>Point and click.</b> No YAML, no terminal, no cloud console.</li>
+        <li><b>Applied for you.</b> Run rolls each change out and stops the node gracefully first.</li>
+        <li><b>On record.</b> Every change is kept in Run's history, so nothing changes without a trace.</li>
+        <li><b>Isolated.</b> Each mint gets its own node, volume and keys.</li>
       </ul>
     </div>
     <div class="split__visual reveal">
-      <div class="code" role="img" aria-label="A git commit adding a mint's manifest">
-        <div class="code__bar"><span></span><span></span><span></span><b>commit a3f9c1e · run: provision satoshi</b></div>
-<pre><span class="c-dim">--- /dev/null</span>
-<span class="c-dim">+++ mints/satoshi.yaml</span>
-<span class="c-add">+apiVersion: run.lnurlcash.com/v1</span>
-<span class="c-add">+kind: Mint</span>
-<span class="c-add">+metadata:</span>
-<span class="c-add">+  name: satoshi</span>
-<span class="c-add">+  owner: npub1sat0shi…q9x</span>
-<span class="c-add">+spec:</span>
-<span class="c-add">+  image: lnurlcash/lnurl-mint-rust:0.1</span>
-<span class="c-add">+  domain: satoshi.run.lnurlcash.com</span>
-<span class="c-add">+  network: bitcoin</span>
-<span class="c-add">+  chain: electrs</span>
-<span class="c-add">+  liquidity:</span>
-<span class="c-add">+    lsp: lsps2</span>
-<span class="c-add">+    maxOpeningFeePpm: 10000</span>
-<span class="c-add">+  fees:</span>
-<span class="c-add">+    baseMsat: 1000</span>
-<span class="c-add">+    ppm: 0</span></pre>
-      </div>
-      <ol class="flow" aria-label="From commit to running mint">
-        <li><b>Run</b><span>writes the commit</span></li>
-        <li><b>git</b><span>the source of truth</span></li>
-        <li><b>Argo CD</b><span>syncs the cluster</span></li>
-        <li><b>Kubernetes</b><span>your mint, live</span></li>
-      </ol>
+      <figure class="plate" aria-label="Illustration of a mint's admin settings">
+        <div class="plate__corner plate__corner--tl" aria-hidden="true"></div>
+        <div class="plate__corner plate__corner--tr" aria-hidden="true"></div>
+        <div class="plate__corner plate__corner--bl" aria-hidden="true"></div>
+        <div class="plate__corner plate__corner--br" aria-hidden="true"></div>
+        <div class="plate__head">
+          <span class="plate__host">satoshi · settings</span>
+          <span class="pill pill--ok">saved</span>
+        </div>
+        <dl class="plate__rows">
+          <div class="plate__row">
+            <dt>fees</dt>
+            <dd>1 sat base · 0 ppm</dd>
+          </div>
+          <div class="plate__row">
+            <dt>fee cap</dt>
+            <dd>LSPS2 opening fee · at most 1%</dd>
+          </div>
+          <div class="plate__row">
+            <dt>domain</dt>
+            <dd>satoshi.run.lnurlcash.com</dd>
+          </div>
+          <div class="plate__row">
+            <dt>network</dt>
+            <dd>bitcoin</dd>
+          </div>
+        </dl>
+        <figcaption class="plate__caption">Illustration · a mint's settings</figcaption>
+      </figure>
     </div>
   </section>
 
@@ -203,35 +204,37 @@
   <!-- ============================== chain ============================== -->
   <section class="split" id="chain" aria-labelledby="chain-heading">
     <div class="split__copy reveal">
-      <p class="eyebrow eyebrow--static">03 · A CHAIN BACKEND YOU DON'T RUN</p>
-      <h2 id="chain-heading">One Bitcoin Core. One electrs. Every mint in sync.</h2>
+      <p class="eyebrow eyebrow--static">03 · CHAIN SYNC, YOUR CHOICE</p>
+      <h2 id="chain-heading">Our full node by default. Any Electrum server if you prefer.</h2>
       <p>
         A Lightning node needs to watch the chain: it has to see its channels confirm, catch a cheating
-        counterparty, and sweep closed channels home. Run keeps a fully validating <b>Bitcoin Core</b> node with an
-        <b>electrs</b> index in front of it. Each mint's node syncs from electrs over the Electrum protocol, with
-        nothing to download per mint and no RPC credentials to rotate.
+        counterparty, and sweep closed channels home. Out of the box, your mint syncs from Run's own fully
+        validating Bitcoin node. If you'd rather trust another source, point it at a public Electrum server or
+        one you run yourself.
       </p>
       <ul class="ticks">
-        <li><b>Fully validating.</b> Bitcoin Core checks every block itself, so no third-party API is trusted.</li>
-        <li><b>Indexed once, served to all.</b> electrs answers every mint's queries in milliseconds.</li>
-        <li><b>Inside the cluster.</b> Chain queries never leave Run's network.</li>
+        <li><b>Works out of the box.</b> Run's full node is the default, with nothing to set up.</li>
+        <li><b>Bring your own.</b> Any Electrum server, public or your own, set from the admin.</li>
+        <li><b>Nothing to download.</b> Your mint never syncs the blockchain itself.</li>
       </ul>
     </div>
     <div class="split__visual reveal">
       <svg class="diagram" viewBox="0 0 420 300" role="img" aria-labelledby="chain-svg-title">
-        <title id="chain-svg-title">Bitcoin Core feeds electrs, which serves many mints</title>
+        <title id="chain-svg-title">Mints sync from Run's full node, or from an Electrum server of their choice</title>
         <defs>
           <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
             <path d="M0 0 8 4 0 8z" class="diagram__arrow"/>
           </marker>
         </defs>
-        <rect class="diagram__box diagram__box--gold" x="20" y="120" width="110" height="60" rx="3"/>
-        <text class="diagram__label" x="75" y="146" text-anchor="middle">Bitcoin Core</text>
-        <text class="diagram__sub" x="75" y="164" text-anchor="middle">validates</text>
-        <rect class="diagram__box diagram__box--gold" x="165" y="120" width="100" height="60" rx="3"/>
-        <text class="diagram__label" x="215" y="146" text-anchor="middle">electrs</text>
-        <text class="diagram__sub" x="215" y="164" text-anchor="middle">indexes</text>
-        <line class="diagram__line" x1="130" y1="150" x2="163" y2="150" marker-end="url(#arrow)"/>
+        <rect class="diagram__box diagram__box--gold" x="20" y="64" width="180" height="60" rx="3"/>
+        <text class="diagram__label" x="110" y="90" text-anchor="middle">Run's full node</text>
+        <text class="diagram__sub" x="110" y="108" text-anchor="middle">the default</text>
+        <text class="diagram__sub" x="110" y="155" text-anchor="middle">or</text>
+        <rect class="diagram__box diagram__box--gold diagram__box--ghost" x="20" y="176" width="180" height="60" rx="3"/>
+        <text class="diagram__label" x="110" y="202" text-anchor="middle">Electrum server</text>
+        <text class="diagram__sub" x="110" y="220" text-anchor="middle">public or your own</text>
+        <path class="diagram__line" d="M200 94 C 240 94, 240 150, 265 150"/>
+        <path class="diagram__line diagram__line--ghost" d="M200 206 C 240 206, 240 150, 265 150"/>
         <g class="diagram__mints">
           <rect class="diagram__box diagram__box--mint" x="310" y="30" width="96" height="44" rx="3"/>
           <text class="diagram__label diagram__label--small" x="358" y="57" text-anchor="middle">satoshi</text>
@@ -256,8 +259,8 @@
     <h2 id="ops-heading">The operations a node needs, done for you.</h2>
     <div class="feature-grid">
       <article class="feature reveal">
-        <h3>Upgrades as commits</h3>
-        <p>A new lnurl-mint release is a version bump in the manifest. Argo CD rolls it out and stops the node gracefully first, so channel state is written before the pod goes.</p>
+        <h3>Upgrades, rolled out</h3>
+        <p>New lnurl-mint releases are rolled out for you, and the node is stopped gracefully first, so channel state is written before it restarts.</p>
       </article>
       <article class="feature reveal">
         <h3>Snapshots of node state</h3>
