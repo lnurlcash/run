@@ -97,6 +97,67 @@ function joined(res) {
 const panel = $('[data-mint-panel]');
 const mintOut = $('[data-mint-out]');
 
+const sats = (n) => `${Number(n || 0).toLocaleString('en')} sat`;
+
+/** A signed POST to one of Run's mint endpoints. */
+async function signedPost(path, payload) {
+  const nostr = await signer();
+  if (!nostr) throw new Error('sign in with your nostr extension');
+  const url = `${location.origin}${path}`;
+  const body = JSON.stringify(payload);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', Authorization: await httpAuth(nostr, url, 'POST', body)},
+    body,
+  });
+  const data = await res.json().catch(() => ({reason: `the server answered ${res.status}`}));
+  if (!res.ok || data.status !== 'OK') throw new Error(data.reason || 'that failed');
+  return data;
+}
+
+/** A button that asks once more before it acts: no browser dialogs. */
+function confirmButton(label, again, className, action) {
+  const button = el('button', label, {type: 'button', className: `btn btn--small ${className}`});
+  let armed = false;
+  button.addEventListener('click', async () => {
+    if (!armed) {
+      armed = true;
+      button.textContent = again;
+      return;
+    }
+    button.disabled = true;
+    try {
+      await action();
+    } catch (err) {
+      button.disabled = false;
+      armed = false;
+      button.textContent = label;
+      button.after(el('span', `Couldn't: ${err.message || err}`, {className: 'bad'}));
+    }
+  });
+  return button;
+}
+
+/** What a closing mint reports is left in it; the delete button waits for `drained`. */
+async function showClosing(m, status, deleteButton) {
+  try {
+    const res = await fetch(m.closing_url);
+    const s = await res.json();
+    if (s.status === 'ERROR') throw new Error(s.reason);
+    if (s.drained) {
+      status.textContent = `Everything is swept to ${s.sweep_address}. You can delete the mint now.`;
+      deleteButton.disabled = false;
+      return;
+    }
+    status.textContent =
+      `Closing: ${s.channels} channel${s.channels === 1 ? '' : 's'} open, ${sats(s.lightning_sat)} in channels, ` +
+      `${sats(s.sweeping_sat)} being swept from closed ones, ${sats(s.onchain_sat)} on its way to your address.`;
+  } catch {
+    status.textContent = 'Closing: the mint is restarting or not reachable yet.';
+  }
+  setTimeout(() => showClosing(m, status, deleteButton), 30_000);
+}
+
 function mintCard(m) {
   const card = el('div', '', {className: 'mint-card'});
   const link = el('a', m.url, {
@@ -105,9 +166,34 @@ function mintCard(m) {
     rel: 'noopener',
   });
   card.append(el('b', m.name), link, el('span', `Lightning Address: ${m.lightning_address}`));
+  if (m.sweep_address) {
+    const sweep = el('span', 'Sweeps to ');
+    sweep.append(el('code', m.sweep_address));
+    card.append(sweep);
+  }
   card.append(
     el('span', m.commit ? `Committed in ${m.commit}: Argo CD is rolling it out.` : 'Being committed…', {className: 'muted'}),
   );
+  const actions = el('div', '', {className: 'mint-card__actions'});
+  if (!m.closing) {
+    actions.append(
+      confirmButton('Close mint', 'Close every channel and sweep it all?', 'btn--danger', async () => {
+        const updated = await signedPost('/api/mints/close', {name: m.name});
+        card.replaceWith(mintCard(updated));
+      }),
+    );
+  } else {
+    const status = el('span', 'Closing…', {className: 'muted'});
+    const remove = confirmButton('Delete mint', 'Delete it for good?', 'btn--danger', async () => {
+      await signedPost('/api/mints/delete', {name: m.name});
+      card.replaceWith(el('span', `${m.name} is deleted.`, {className: 'muted'}));
+    });
+    remove.disabled = true;
+    card.append(status);
+    actions.append(remove);
+    showClosing(m, status, remove);
+  }
+  card.append(actions);
   return card;
 }
 
@@ -115,13 +201,14 @@ function showMints(mints) {
   panel.hidden = false;
   if (mints.length) {
     $('h3', panel).textContent = mints.length === 1 ? 'Your mint' : 'Your mints';
-    $('.mint-panel__row', panel).hidden = true;
+    $('[data-mint-new]', panel).hidden = true;
     $('.small', panel).hidden = true;
     mintOut.replaceChildren(...mints.map(mintCard));
   }
 }
 
 const nameInput = $('input[name=mint]', panel);
+const sweepInput = $('input[name=sweep]', panel);
 nameInput.addEventListener('input', () => {
   nameInput.value = nameInput.value.toLowerCase().replace(/[^a-z0-9-]/g, '');
   $('[data-mint-preview]').textContent = nameInput.value || 'yourname';
@@ -137,22 +224,18 @@ $('[data-create-mint]').addEventListener('click', async (event) => {
     nameInput.focus();
     return;
   }
-  const nostr = await signer();
-  if (!nostr) return;
+  const sweep = sweepInput.value.trim();
+  if (!sweep) {
+    mintOut.replaceChildren(
+      el('span', 'Give an on-chain address of your own wallet: closed channels pay out there.', {className: 'bad'}),
+    );
+    sweepInput.focus();
+    return;
+  }
   button.disabled = true;
   mintOut.replaceChildren(el('span', 'Committing your mint…', {className: 'muted'}));
   try {
-    const url = `${location.origin}/api/mints`;
-    const body = JSON.stringify({name});
-    const auth = await httpAuth(nostr, url, 'POST', body);
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', Authorization: auth},
-      body,
-    });
-    const data = await res.json().catch(() => ({reason: `the server answered ${res.status}`}));
-    if (!res.ok || data.status !== 'OK') throw new Error(data.reason || 'provisioning failed');
-    showMints([data]);
+    showMints([await signedPost('/api/mints', {name, sweep_address: sweep})]);
   } catch (err) {
     mintOut.replaceChildren(
       el('span', `Couldn't create it: ${err.message || err}`, {

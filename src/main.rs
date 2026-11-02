@@ -15,7 +15,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -171,7 +171,20 @@ enum Command {
         name: String,
         #[arg(long)]
         owner: String,
+        /// The owner's on-chain address the mint's coins are sent to.
+        #[arg(long)]
+        sweep_address: Option<String>,
     },
+    /// Close a mint for good: every channel closed, everything sent to its
+    /// sweep address.
+    Close {
+        name: String,
+        /// Set (or change) the sweep address on the way.
+        #[arg(long)]
+        sweep_address: Option<String>,
+    },
+    /// Remove a mint's directory, once it is drained. Its volume stays.
+    Delete { name: String },
     /// Scale a mint to zero. Its volume, seed and channels stay.
     Disable { name: String },
     /// Scale a mint back up.
@@ -269,8 +282,13 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/beta", get(count).post(sign_up))
         .route("/api/mints", get(my_mints).post(create_mint))
+        .route("/api/mints/close", post(close_mint))
+        .route("/api/mints/delete", post(delete_mint))
         .layer(DefaultBodyLimit::max(4096))
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            csp(state.gitops.as_ref()),
+            security_headers,
+        ))
         .with_state(state)
 }
 
@@ -285,16 +303,28 @@ async fn page(content_type: &'static str, body: &'static str) -> Response {
         .into_response()
 }
 
-async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
+/// The page's policy. With provisioning on, it may also read the mints'
+/// own `/closing`, to show a closing mint's owner what is left in it.
+fn csp(gitops: Option<&gitops::GitOps>) -> HeaderValue {
+    let connect = match gitops {
+        Some(g) => format!("'self' https://*.{}", g.platform.domain),
+        None => "'self'".into(),
+    };
+    HeaderValue::from_str(&format!(
+        "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; \
+         img-src 'self' data:; connect-src {connect}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    ))
+    .expect("a domain is a valid header value")
+}
+
+async fn security_headers(
+    State(csp): State<HeaderValue>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
     let mut res = next.run(req).await;
     let h = res.headers_mut();
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; \
-             img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
-        ),
-    );
+    h.insert(header::CONTENT_SECURITY_POLICY, csp);
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -402,10 +432,35 @@ fn mints_json(state: &AppState, owner: &str) -> Result<Value, (StatusCode, Json<
     let Some(g) = &state.gitops else {
         return Ok(json!([]));
     };
-    let rows = state.store.mints(Some(owner)).map_err(internal)?;
+    let rows = live_mints(state, owner)?;
     Ok(Value::Array(
         rows.into_iter().map(|m| mint_json(g, &m)).collect(),
     ))
+}
+
+/// `owner`'s mints that aren't deleted.
+fn live_mints(
+    state: &AppState,
+    owner: &str,
+) -> Result<Vec<db::MintRow>, (StatusCode, Json<Value>)> {
+    Ok(state
+        .store
+        .mints(Some(owner))
+        .map_err(internal)?
+        .into_iter()
+        .filter(|m| m.deleted_at.is_none())
+        .collect())
+}
+
+/// What a stored mint is rendered from.
+fn mint_of(m: &db::MintRow) -> gitops::Mint {
+    gitops::Mint {
+        name: m.name.clone(),
+        owner: m.owner.clone(),
+        enabled: m.enabled,
+        sweep_address: m.sweep_address.clone(),
+        closing: m.closing,
+    }
 }
 
 fn mint_json(g: &gitops::GitOps, m: &db::MintRow) -> Value {
@@ -416,6 +471,10 @@ fn mint_json(g: &gitops::GitOps, m: &db::MintRow) -> Value {
         "lightning_address": format!("mint@{host}"),
         "enabled": m.enabled,
         "commit": m.commit_id,
+        "sweep_address": m.sweep_address,
+        "closing": m.closing,
+        // the mint's own report of what is left in it, while closing
+        "closing_url": format!("https://{host}/closing"),
     })
 }
 
@@ -444,6 +503,8 @@ async fn my_mints(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Api
 #[derive(Deserialize)]
 struct NewMint {
     name: String,
+    /// Where the mint's coins go: closed channels, and everything on closing.
+    sweep_address: String,
 }
 
 /// `POST /api/mints {"name"}`, signed by an approved member: commit a new
@@ -454,8 +515,12 @@ async fn create_mint(
     body: Bytes,
 ) -> ApiResult {
     let owner = signer(&state, &headers, "POST", "/api/mints", &body)?;
-    let req: NewMint = serde_json::from_slice(&body)
-        .map_err(|_| refuse(StatusCode::BAD_REQUEST, "expected {\"name\": \"…\"}"))?;
+    let req: NewMint = serde_json::from_slice(&body).map_err(|_| {
+        refuse(
+            StatusCode::BAD_REQUEST,
+            "expected {\"name\": \"…\", \"sweep_address\": \"bc1…\"}",
+        )
+    })?;
     let name = req.name.trim().to_ascii_lowercase();
     if state.gitops.is_none() {
         return Err(refuse(
@@ -470,7 +535,8 @@ async fn create_mint(
         ));
     }
     gitops::check_name(&name).map_err(|e| refuse(StatusCode::BAD_REQUEST, e))?;
-    if state.store.mints(Some(&owner)).map_err(internal)?.len() >= state.mints_per_member {
+    let sweep_address = sweep_address(&state, &req.sweep_address)?;
+    if live_mints(&state, &owner)?.len() >= state.mints_per_member {
         return Err(refuse(
             StatusCode::FORBIDDEN,
             "you have as many mints as the beta allows",
@@ -478,7 +544,7 @@ async fn create_mint(
     }
     if !state
         .store
-        .claim_mint(&name, &owner, now())
+        .claim_mint(&name, &owner, Some(&sweep_address), now())
         .map_err(internal)?
     {
         return Err(refuse(StatusCode::CONFLICT, "that name is taken"));
@@ -488,6 +554,8 @@ async fn create_mint(
         name: name.clone(),
         owner: owner.clone(),
         enabled: true,
+        sweep_address: Some(sweep_address),
+        closing: false,
     };
     let committed =
         tokio::task::spawn_blocking(move || worker.gitops.as_ref().map(|g| g.provision(&mint)))
@@ -501,14 +569,7 @@ async fn create_mint(
                 .mint_committed(&name, &commit, true)
                 .map_err(internal)?;
             log::info!("provisioned {name} for {} in {commit}", nostr::npub(&owner));
-            let row = state
-                .store
-                .mint(&name)
-                .map_err(internal)?
-                .ok_or_else(|| internal(anyhow::anyhow!("lost {name}")))?;
-            let mut res = mint_json(state.gitops.as_ref().expect("checked above"), &row);
-            res["status"] = json!("OK");
-            Ok(Json(res))
+            mint_reply(&state, &name)
         }
         Some(Err(e)) => {
             let _ = state.store.release_mint(&name);
@@ -519,6 +580,169 @@ async fn create_mint(
             "provisioning isn't open yet",
         )),
     }
+}
+
+/// A sweep address checked for the platform's network.
+fn sweep_address(state: &AppState, address: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    let g = state.gitops.as_ref().ok_or_else(|| {
+        refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provisioning isn't open yet",
+        )
+    })?;
+    g.platform
+        .check_sweep_address(address)
+        .map_err(|e| refuse(StatusCode::BAD_REQUEST, e))
+}
+
+/// The signer's mint named in a signed body, if it's theirs and not deleted.
+fn own_mint(
+    state: &AppState,
+    owner: &str,
+    name: &str,
+) -> Result<db::MintRow, (StatusCode, Json<Value>)> {
+    if state.gitops.is_none() {
+        return Err(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provisioning isn't open yet",
+        ));
+    }
+    let name = name.trim().to_ascii_lowercase();
+    match state.store.mint(&name).map_err(internal)? {
+        Some(m) if m.owner == owner && m.deleted_at.is_none() => Ok(m),
+        _ => Err(refuse(
+            StatusCode::NOT_FOUND,
+            "you have no mint by that name",
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct CloseMint {
+    name: String,
+    /// A new sweep address, or none to keep the one the mint has.
+    sweep_address: Option<String>,
+}
+
+/// `POST /api/mints/close {"name", "sweep_address"?}`, signed by its owner:
+/// close the mint for good. It refuses new notes, closes every channel and
+/// sends everything to its sweep address.
+async fn close_mint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult {
+    let owner = signer(&state, &headers, "POST", "/api/mints/close", &body)?;
+    let req: CloseMint = serde_json::from_slice(&body)
+        .map_err(|_| refuse(StatusCode::BAD_REQUEST, "expected {\"name\": \"…\"}"))?;
+    let row = own_mint(&state, &owner, &req.name)?;
+    let address = match req
+        .sweep_address
+        .as_deref()
+        .filter(|a| !a.trim().is_empty())
+    {
+        Some(a) => sweep_address(&state, a)?,
+        None => row.sweep_address.clone().ok_or_else(|| {
+            refuse(
+                StatusCode::BAD_REQUEST,
+                "give the address everything should be sent to",
+            )
+        })?,
+    };
+    let mint = gitops::Mint {
+        sweep_address: Some(address.clone()),
+        closing: true,
+        // a disabled mint can't close its channels
+        enabled: true,
+        ..mint_of(&row)
+    };
+    let worker = Arc::clone(&state);
+    let committed = tokio::task::spawn_blocking(move || {
+        worker
+            .gitops
+            .as_ref()
+            .expect("checked by own_mint")
+            .update(&mint, "close")
+    })
+    .await
+    .map_err(|e| internal(e.into()))?
+    .map_err(|e| internal(e.context(format!("closing {}", row.name))))?;
+    let commit = committed.or(row.commit_id.clone()).unwrap_or_default();
+    state
+        .store
+        .mint_closing(&row.name, &address, true)
+        .map_err(internal)?;
+    state
+        .store
+        .mint_committed(&row.name, &commit, true)
+        .map_err(internal)?;
+    log::info!(
+        "closing {} for {}, sweeping to {address}, in {commit}",
+        row.name,
+        nostr::npub(&owner)
+    );
+    mint_reply(&state, &row.name)
+}
+
+#[derive(Deserialize)]
+struct DeleteMint {
+    name: String,
+}
+
+/// `POST /api/mints/delete {"name"}`, signed by its owner: remove a closing
+/// mint's directory. The page offers it once the mint reports `drained`;
+/// its volume stays either way, so an early delete can be undone by hand.
+async fn delete_mint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult {
+    let owner = signer(&state, &headers, "POST", "/api/mints/delete", &body)?;
+    let req: DeleteMint = serde_json::from_slice(&body)
+        .map_err(|_| refuse(StatusCode::BAD_REQUEST, "expected {\"name\": \"…\"}"))?;
+    let row = own_mint(&state, &owner, &req.name)?;
+    if !row.closing {
+        return Err(refuse(
+            StatusCode::CONFLICT,
+            "close the mint first, and wait until everything is swept out",
+        ));
+    }
+    let worker = Arc::clone(&state);
+    let name = row.name.clone();
+    let committed = tokio::task::spawn_blocking(move || {
+        worker
+            .gitops
+            .as_ref()
+            .expect("checked by own_mint")
+            .delete(&name)
+    })
+    .await
+    .map_err(|e| internal(e.into()))?
+    .map_err(|e| internal(e.context(format!("deleting {}", row.name))))?;
+    let commit = committed.unwrap_or_default();
+    state
+        .store
+        .mint_deleted(&row.name, &commit, now())
+        .map_err(internal)?;
+    log::info!(
+        "deleted {} for {} in {commit}",
+        row.name,
+        nostr::npub(&owner)
+    );
+    Ok(Json(
+        json!({"status": "OK", "name": row.name, "commit": commit}),
+    ))
+}
+
+fn mint_reply(state: &AppState, name: &str) -> ApiResult {
+    let row = state
+        .store
+        .mint(name)
+        .map_err(internal)?
+        .ok_or_else(|| internal(anyhow::anyhow!("lost {name}")))?;
+    let mut res = mint_json(state.gitops.as_ref().expect("provisioning is on"), &row);
+    res["status"] = json!("OK");
+    Ok(Json(res))
 }
 
 /// The operator's subcommands.
@@ -557,19 +781,32 @@ fn operator(
             for m in store.mints(None)? {
                 println!(
                     "{}",
-                    json!({"name": m.name, "owner": nostr::npub(&m.owner), "enabled": m.enabled, "commit": m.commit_id})
+                    json!({"name": m.name, "owner": nostr::npub(&m.owner), "enabled": m.enabled, "commit": m.commit_id,
+                           "sweep_address": m.sweep_address, "closing": m.closing, "deleted_at": m.deleted_at})
                 );
             }
         }
-        Command::Provision { name, owner } => {
+        Command::Provision {
+            name,
+            owner,
+            sweep_address,
+        } => {
             let g = need()?;
             let owner = nostr::parse_pubkey(&owner)?;
             gitops::check_name(&name)?;
-            anyhow::ensure!(store.claim_mint(&name, &owner, now())?, "{name} is taken");
+            let sweep_address = sweep_address
+                .map(|a| g.platform.check_sweep_address(&a))
+                .transpose()?;
+            anyhow::ensure!(
+                store.claim_mint(&name, &owner, sweep_address.as_deref(), now())?,
+                "{name} is taken"
+            );
             match g.provision(&gitops::Mint {
                 name: name.clone(),
                 owner,
                 enabled: true,
+                sweep_address,
+                closing: false,
             }) {
                 Ok(commit) => {
                     let commit = commit.unwrap_or_default();
@@ -582,20 +819,55 @@ fn operator(
                 }
             }
         }
-        Command::Disable { name } | Command::Enable { name } if store.mint(&name)?.is_none() => {
+        Command::Disable { name } | Command::Enable { name } | Command::Delete { name }
+            if store.mint(&name)?.is_none_or(|m| m.deleted_at.is_some()) =>
+        {
             anyhow::bail!("no mint named {name}")
+        }
+        Command::Close {
+            name,
+            sweep_address,
+        } => {
+            let g = need()?;
+            let m = store
+                .mint(&name)?
+                .filter(|m| m.deleted_at.is_none())
+                .ok_or_else(|| anyhow::anyhow!("no mint named {name}"))?;
+            let address = match sweep_address {
+                Some(a) => g.platform.check_sweep_address(&a)?,
+                None => m.sweep_address.clone().ok_or_else(|| {
+                    anyhow::anyhow!("{name} has no sweep address: pass --sweep-address")
+                })?,
+            };
+            let mint = gitops::Mint {
+                sweep_address: Some(address.clone()),
+                closing: true,
+                enabled: true,
+                ..mint_of(&m)
+            };
+            let commit = g
+                .update(&mint, "close")?
+                .or(m.commit_id)
+                .unwrap_or_default();
+            store.mint_closing(&name, &address, true)?;
+            store.mint_committed(&name, &commit, true)?;
+            println!("closing {name}, sweeping to {address} ({commit})");
+        }
+        Command::Delete { name } => {
+            let commit = need()?.delete(&name)?.unwrap_or_default();
+            store.mint_deleted(&name, &commit, now())?;
+            println!("deleted {name} ({commit}): its volume stays");
         }
         Command::Disable { name } => set_enabled(need()?, store, &name, false)?,
         Command::Enable { name } => set_enabled(need()?, store, &name, true)?,
         Command::Rerender => {
             let g = need()?;
-            for m in store.mints(None)? {
-                let mint = gitops::Mint {
-                    name: m.name.clone(),
-                    owner: m.owner.clone(),
-                    enabled: m.enabled,
-                };
-                match g.update(&mint, "re-render")? {
+            for m in store
+                .mints(None)?
+                .into_iter()
+                .filter(|m| m.deleted_at.is_none())
+            {
+                match g.update(&mint_of(&m), "re-render")? {
                     Some(commit) => {
                         store.mint_committed(&m.name, &commit, m.enabled)?;
                         println!("{}: {commit}", m.name);
@@ -618,9 +890,8 @@ fn set_enabled(
         .mint(name)?
         .ok_or_else(|| anyhow::anyhow!("no mint named {name}"))?;
     let mint = gitops::Mint {
-        name: m.name,
-        owner: m.owner,
         enabled,
+        ..mint_of(&m)
     };
     let commit = g.update(&mint, if enabled { "enable" } else { "disable" })?;
     let commit = commit.or(m.commit_id).unwrap_or_default();
@@ -735,15 +1006,16 @@ mod tests {
         });
         let app = router(Arc::clone(&state));
         const MINTS: &str = "https://run.lnurlcash.com/api/mints";
+        const SWEEP: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
         let create = |secret: [u8; 32], name: &str| {
-            let body = format!(r#"{{"name":"{name}"}}"#);
+            let body = format!(r#"{{"name":"{name}","sweep_address":"{SWEEP}"}}"#);
             let auth = nostr::tests::auth_header(secret, MINTS, body.as_bytes(), now());
             (body, auth)
         };
-        let send = |body: String, auth: String| {
+        let send_to = |path: &'static str, body: String, auth: String| {
             let app = app.clone();
             async move {
-                let req = Request::post("/api/mints")
+                let req = Request::post(path)
                     .header("authorization", auth)
                     .body(Body::from(body))
                     .unwrap();
@@ -755,6 +1027,7 @@ mod tests {
                 (status, serde_json::from_slice::<Value>(&bytes).unwrap())
             }
         };
+        let send = |body: String, auth: String| send_to("/api/mints", body, auth);
 
         // signed up, but not approved yet
         let (body, auth) = create([7; 32], "satoshi");
@@ -767,6 +1040,7 @@ mod tests {
         let (status, res) = send(body, auth).await;
         assert_eq!(status, StatusCode::OK, "{res}");
         assert_eq!(res["lightning_address"], "mint@satoshi.run.lnurlcash.com");
+        assert_eq!(res["sweep_address"], SWEEP);
         assert!(
             res["commit"].as_str().is_some_and(|c| c.len() >= 7),
             "{res}"
@@ -783,6 +1057,16 @@ mod tests {
         assert_eq!(send(body, auth).await.0, StatusCode::CONFLICT);
         let (body, auth) = create([8; 32], "www");
         assert_eq!(send(body, auth).await.0, StatusCode::BAD_REQUEST);
+        // a sweep address for another network
+        let body =
+            r#"{"name":"mainnet","sweep_address":"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"}"#;
+        let auth = nostr::tests::auth_header([8; 32], MINTS, body.as_bytes(), now());
+        let (status, res) = send(body.into(), auth).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            res["reason"].as_str().unwrap().contains("another network"),
+            "{res}"
+        );
         // a signature for another endpoint doesn't carry over
         let body = r#"{"name":"stolen"}"#.to_string();
         let auth = nostr::tests::auth_header(
@@ -826,14 +1110,68 @@ mod tests {
         assert_eq!(listed["mints"][0]["name"], "satoshi", "{listed}");
         assert_eq!(listed["mints"].as_array().unwrap().len(), 1);
 
+        // closing and deleting: only by the owner, and deleting only once closing
+        const CLOSE: &str = "https://run.lnurlcash.com/api/mints/close";
+        const DELETE: &str = "https://run.lnurlcash.com/api/mints/delete";
+        let signed = |secret: [u8; 32], url: &str, body: &str| {
+            (
+                body.to_string(),
+                nostr::tests::auth_header(secret, url, body.as_bytes(), now()),
+            )
+        };
+        let name = r#"{"name":"satoshi"}"#;
+        let (body, auth) = signed([7; 32], DELETE, name);
+        assert_eq!(
+            send_to("/api/mints/delete", body, auth).await.0,
+            StatusCode::CONFLICT
+        );
+        let (body, auth) = signed([8; 32], CLOSE, name);
+        assert_eq!(
+            send_to("/api/mints/close", body, auth).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let (body, auth) = signed([7; 32], CLOSE, name);
+        let (status, res) = send_to("/api/mints/close", body, auth).await;
+        assert_eq!(status, StatusCode::OK, "{res}");
+        assert_eq!(res["closing"], true);
+        assert_eq!(
+            res["closing_url"],
+            "https://satoshi.run.lnurlcash.com/closing"
+        );
+        let resources = std::process::Command::new("git")
+            .args(["show", "main:mints/satoshi/resources.yaml"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let resources = String::from_utf8_lossy(&resources.stdout);
+        assert!(resources.contains("\"CLOSE_ALL\""), "{resources}");
+        assert!(resources.contains(SWEEP), "{resources}");
+        let (body, auth) = signed([7; 32], DELETE, name);
+        let (status, res) = send_to("/api/mints/delete", body, auth).await;
+        assert_eq!(status, StatusCode::OK, "{res}");
+        // gone from the owner's list, and the name stays taken
+        assert!(live_mints(&state, &pubkey).unwrap().is_empty());
+        assert!(
+            !state
+                .store
+                .claim_mint("satoshi", &other, None, now())
+                .unwrap()
+        );
+
         let log = std::process::Command::new("git")
             .args(["log", "--format=%s", "main"])
             .current_dir(&remote)
             .output()
             .unwrap();
         let log = String::from_utf8_lossy(&log.stdout);
-        assert_eq!(log.lines().count(), 1, "{log}");
-        assert!(log.starts_with("run: provision satoshi for npub1"), "{log}");
+        let subjects: Vec<_> = log.lines().collect();
+        assert_eq!(subjects.len(), 3, "{log}");
+        assert_eq!(subjects[0], "run: delete satoshi");
+        assert_eq!(subjects[1], "run: close satoshi");
+        assert!(
+            subjects[2].starts_with("run: provision satoshi for npub1"),
+            "{log}"
+        );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

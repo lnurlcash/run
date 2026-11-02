@@ -55,6 +55,17 @@ impl Store {
                 "ALTER TABLE signups ADD COLUMN approved INTEGER NOT NULL DEFAULT 0",
             )?;
         }
+        // where a mint's coins go, and its closing and deletion
+        let has_sweep: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('mints') WHERE name = 'sweep_address'")?
+            .exists([])?;
+        if !has_sweep {
+            conn.execute_batch(
+                "ALTER TABLE mints ADD COLUMN sweep_address TEXT;
+                 ALTER TABLE mints ADD COLUMN closing INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE mints ADD COLUMN deleted_at INTEGER;",
+            )?;
+        }
         Ok(Store(Mutex::new(conn)))
     }
 
@@ -115,12 +126,38 @@ impl Store {
             .exists([pubkey])?)
     }
 
-    /// Claim `name` for `owner`, before its commit. Refuses a taken name.
-    pub fn claim_mint(&self, name: &str, owner: &str, now: u64) -> Result<bool> {
+    /// Claim `name` for `owner`, before its commit. Refuses a taken name,
+    /// a deleted mint's too: its volume, with its seed, is still there.
+    pub fn claim_mint(
+        &self,
+        name: &str,
+        owner: &str,
+        sweep_address: Option<&str>,
+        now: u64,
+    ) -> Result<bool> {
         Ok(self.conn().execute(
-            "INSERT OR IGNORE INTO mints (name, owner, created_at) VALUES (?1, ?2, ?3)",
-            params![name, owner, now as i64],
+            "INSERT OR IGNORE INTO mints (name, owner, sweep_address, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![name, owner, sweep_address, now as i64],
         )? == 1)
+    }
+
+    /// A mint closing (or not), its coins going to `sweep_address`.
+    pub fn mint_closing(&self, name: &str, sweep_address: &str, closing: bool) -> Result<()> {
+        self.conn().execute(
+            "UPDATE mints SET sweep_address = ?2, closing = ?3 WHERE name = ?1",
+            params![name, sweep_address, closing],
+        )?;
+        Ok(())
+    }
+
+    /// Its directory is gone from the repository; the row stays, so the
+    /// name stays taken.
+    pub fn mint_deleted(&self, name: &str, commit: &str, now: u64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE mints SET commit_id = ?2, enabled = 0, deleted_at = ?3 WHERE name = ?1",
+            params![name, commit, now as i64],
+        )?;
+        Ok(())
     }
 
     /// A claim whose commit failed: give the name back.
@@ -145,18 +182,18 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT name, owner, enabled, commit_id, created_at FROM mints WHERE name = ?1",
+                "SELECT name, owner, enabled, commit_id, created_at, sweep_address, closing, deleted_at FROM mints WHERE name = ?1",
                 [name],
                 mint_row,
             )
             .optional()?)
     }
 
-    /// Every mint, or `owner`'s.
+    /// Every mint, or `owner`'s, deleted ones included.
     pub fn mints(&self, owner: Option<&str>) -> Result<Vec<MintRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT name, owner, enabled, commit_id, created_at FROM mints
+            "SELECT name, owner, enabled, commit_id, created_at, sweep_address, closing, deleted_at FROM mints
              WHERE ?1 IS NULL OR owner = ?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -202,6 +239,11 @@ pub struct MintRow {
     /// The commit that last changed it; `None` while its first is pending.
     pub commit_id: Option<String>,
     pub created_at: u64,
+    /// The owner's on-chain address the mint's coins are sent to.
+    pub sweep_address: Option<String>,
+    /// Closing every channel, for good.
+    pub closing: bool,
+    pub deleted_at: Option<u64>,
 }
 
 fn mint_row(r: &rusqlite::Row) -> rusqlite::Result<MintRow> {
@@ -211,6 +253,9 @@ fn mint_row(r: &rusqlite::Row) -> rusqlite::Result<MintRow> {
         enabled: r.get(2)?,
         commit_id: r.get(3)?,
         created_at: r.get::<_, i64>(4)? as u64,
+        sweep_address: r.get(5)?,
+        closing: r.get(6)?,
+        deleted_at: r.get::<_, Option<i64>>(7)?.map(|t| t as u64),
     })
 }
 
@@ -260,10 +305,14 @@ mod tests {
         store.approve("bb", true).unwrap();
         assert!(store.may_provision("bb").unwrap());
 
-        assert!(store.claim_mint("satoshi", "bb", 5).unwrap());
-        assert!(!store.claim_mint("satoshi", "aa", 6).unwrap());
+        assert!(store.claim_mint("satoshi", "bb", None, 5).unwrap());
+        assert!(!store.claim_mint("satoshi", "aa", None, 6).unwrap());
         store.release_mint("satoshi").unwrap();
-        assert!(store.claim_mint("satoshi", "bb", 7).unwrap());
+        assert!(
+            store
+                .claim_mint("satoshi", "bb", Some("bc1qsweep"), 7)
+                .unwrap()
+        );
         store.mint_committed("satoshi", "a3f9c1e", true).unwrap();
         store.release_mint("satoshi").unwrap();
         assert_eq!(
@@ -273,5 +322,16 @@ mod tests {
         assert_eq!(store.mints(Some("bb")).unwrap().len(), 1);
         assert_eq!(store.mints(Some("aa")).unwrap().len(), 0);
         assert_eq!(store.mints(None).unwrap().len(), 1);
+
+        let m = store.mint("satoshi").unwrap().unwrap();
+        assert_eq!(m.sweep_address.as_deref(), Some("bc1qsweep"));
+        assert!(!m.closing && m.deleted_at.is_none());
+        store.mint_closing("satoshi", "bc1qother", true).unwrap();
+        store.mint_deleted("satoshi", "b4d0e2f", 9).unwrap();
+        let m = store.mint("satoshi").unwrap().unwrap();
+        assert_eq!(m.sweep_address.as_deref(), Some("bc1qother"));
+        assert!(m.closing && !m.enabled && m.deleted_at == Some(9));
+        // a deleted mint's name stays taken
+        assert!(!store.claim_mint("satoshi", "aa", None, 10).unwrap());
     }
 }

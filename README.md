@@ -18,8 +18,10 @@ One binary, `lnurlcash-run`. It serves:
 | `GET /` | The landing page (`web/`, compiled in). |
 | `GET /api/beta` | `{"count": n}`: how many are on the list. |
 | `POST /api/beta` | Join the list (below). |
-| `POST /api/mints` `{"name"}` | Signed (NIP-98) by an approved member: provision a mint. |
+| `POST /api/mints` `{"name", "sweep_address"}` | Signed (NIP-98) by an approved member: provision a mint. |
 | `GET /api/mints` | Signed: the signer's mints. |
+| `POST /api/mints/close` `{"name", "sweep_address"?}` | Signed by the owner: close the mint for good, sweeping everything out. |
+| `POST /api/mints/delete` `{"name"}` | Signed by the owner: remove a closing mint's directory. |
 | `GET /healthz` | `ok`. |
 
 **Joining.** The page asks the browser's NIP-07 signer (Alby, nos2x, …) for a
@@ -86,6 +88,8 @@ included.
 A mint runs `lnurlcash/lnurl-mint-rust` with these settings:
 * `ELECTRUM_URL` set to the shared electrs (no bitcoind credentials anywhere),
   and `LSP_NODE` set to the LSPS2 provider.
+* `SWEEP_ADDRESS` set to the owner's on-chain address, and `CLOSE_ALL=true`
+  once the owner closes it (below).
 * `/data` on its PVC. The PVC is annotated so Argo CD never prunes or deletes
   it: it holds the seed and the channels.
 * Non-root (uid 1000) with a read-only root filesystem and all capabilities
@@ -101,7 +105,9 @@ them, and only keys that signed in themselves can provision:
 ```sh
 lnurlcash-run approve npub1…            # --revoke to take it back
 lnurlcash-run mints                     # JSON lines
-lnurlcash-run provision <name> --owner npub1…   # as the operator, no approval needed
+lnurlcash-run provision <name> --owner npub1… [--sweep-address bc1…]   # as the operator, no approval needed
+lnurlcash-run close <name> [--sweep-address bc1…]   # as the owner's Close button
+lnurlcash-run delete <name>                          # its directory; the volume stays
 lnurlcash-run disable <name>            # replicas: 0; the volume, seed and channels stay
 lnurlcash-run enable <name>
 MINT_IMAGE=lnurlcash/lnurl-mint-rust:0.2.0 lnurlcash-run rerender   # an upgrade: one commit per mint
@@ -111,8 +117,30 @@ An approved member signs in on the page, names their mint and signs once
 more. The mint is live at `<name>.<MINT_DOMAIN>` once Argo CD syncs.
 `MINTS_PER_MEMBER` (default 1) caps how many each member can have.
 
-Deleting a mint is deliberately manual. Remove its directory by hand; the PVC
-stays until someone deletes it, after its funds have been moved out.
+**Sweeping, closing and deleting.** Every mint is created with a sweep
+address: a `bc1…` address (segwit or taproot, for `MINT_NETWORK`) of the
+owner's own wallet. The mint sends its wallet's spendable coins there as
+they arrive (lnurl-mint-rust's `SWEEP_ADDRESS`), so closed channels pay out
+to the owner, not to a wallet on Run's volume. The node still holds its
+channel keys, and with them the money in open channels.
+
+The owner's **Close mint** commits `CLOSE_ALL=true` (scaling a disabled mint
+back up): the mint refuses new notes, closes every channel (by force after an
+hour without a cooperative close) and sweeps everything to the address. The
+page then polls the mint's own `GET https://<name>.<MINT_DOMAIN>/closing`,
+which the CSP allows, and offers **Delete mint** once it reports `drained`:
+nothing left in channels, in sweeps from closed ones or in the wallet. A
+force-close can take up to two weeks to get there. Deleting removes
+`mints/<name>/`; Argo CD deletes the mint's resources but never its PVC, so
+an early delete can be undone by restoring the directory. Run doesn't check
+`drained` itself, since it never talks to the mints. A deleted mint's name
+stays taken, because its volume and seed are still there. Removing the PVC
+stays an operator's job.
+
+Mints made before sweep addresses need one when they close: the API's and
+CLI's `sweep_address` sets it. **`MINT_IMAGE` must be a lnurl-mint-rust
+release that knows `SWEEP_ADDRESS` and `CLOSE_ALL`**: an older one ignores
+both and sweeps nothing.
 
 **Setting up the cluster side, once:**
 1. Create the GitOps repository.
@@ -148,3 +176,4 @@ stays until someone deletes it, after its funds have been moved out.
 * Running the electrs and Bitcoin Core deployment and the LSP from this
   repository.
 * Exporting the data directory to the owner.
+* Changing a running mint's sweep address without closing it.

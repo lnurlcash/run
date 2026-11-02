@@ -1025,6 +1025,27 @@ button {
   font-family: var(--mono);
   overflow-wrap: anywhere;
 }
+.mint-panel__new {
+  display: grid;
+  gap: 12px;
+}
+.mint-card code {
+  overflow-wrap: anywhere;
+}
+.mint-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+.mint-card__actions .btn--danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.mint-card__actions .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* ---------- faq ---------- */
 

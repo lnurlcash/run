@@ -352,9 +352,18 @@
           <p class="eyebrow eyebrow--static"><i class="pulse" aria-hidden="true"></i> YOU'RE IN</p>
           <h3>Name your mint</h3>
           <p class="muted small">It becomes <code><span data-mint-preview>yourname</span>.run.lnurlcash.com</code>, and its Lightning Address is <code>mint@</code> that. Use 3 to 30 characters: a-z, 0-9 and dashes.</p>
-          <div class="mint-panel__row">
-            <input name="mint" autocomplete="off" spellcheck="false" maxlength="30" placeholder="satoshi" aria-label="Mint name" pattern="[a-z0-9][a-z0-9\-]{1,28}[a-z0-9]">
-            <button class="btn btn--primary" type="button" data-create-mint>Sign &amp; create</button>
+          <div class="mint-panel__new" data-mint-new>
+            <div class="mint-panel__row">
+              <input name="mint" autocomplete="off" spellcheck="false" maxlength="30" placeholder="satoshi" aria-label="Mint name" pattern="[a-z0-9][a-z0-9\-]{1,28}[a-z0-9]">
+            </div>
+            <label class="field">
+              <span class="field__label">Your sweep address</span>
+              <span class="mint-panel__row">
+                <input name="sweep" autocomplete="off" spellcheck="false" maxlength="90" placeholder="bc1…" aria-label="Sweep address">
+                <button class="btn btn--primary" type="button" data-create-mint>Sign &amp; create</button>
+              </span>
+            </label>
+            <p class="muted small">An on-chain address of your own wallet. Coins from closed channels go straight there, never to us, and so does everything if you close the mint.</p>
           </div>
           <div class="mint-panel__out" data-mint-out role="status" aria-live="polite"></div>
         </div>
@@ -371,6 +380,14 @@
         volume there. You run the admin, can export the whole data directory, and can move to your own machine at
         any time. If you want the seed never to leave your hardware, run lnurl-mint-rust yourself. It's the same
         software.</p>
+    </details>
+    <details>
+      <summary>How do I get my sats out?</summary>
+      <p>Your mint sends its on-chain coins to the sweep address you gave it, as they arrive. Closed channels' funds
+        land there by themselves. To stop for good, press <b>Close mint</b>: it stops issuing notes, closes every
+        channel and sweeps everything to that address. A force-closed channel waits out its timelock first, which
+        can take up to two weeks. Once nothing is left, you can delete the mint. Let your note holders melt their
+        notes before you close: they can't once the channels are gone.</p>
     </details>
     <details>
       <summary>Is an LNURLcash mint custodial?</summary>

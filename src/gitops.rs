@@ -7,6 +7,9 @@
 //! argocd/applicationset.yaml    one Argo CD Application per mints/* directory
 //! ```
 //!
+//! A deleted mint's directory is removed: Argo CD deletes its Application
+//! and resources, but never the PVC.
+//!
 //! Run only commits and pushes; Argo CD makes the cluster match. Manifests
 //! are built as JSON values and written as YAML whose strings are all
 //! double-quoted (JSON's escaping is valid YAML), so nothing a user names can
@@ -78,6 +81,11 @@ pub struct Mint {
     /// The owner's nostr pubkey, hex.
     pub owner: String,
     pub enabled: bool,
+    /// The owner's on-chain address: the mint sends its spendable coins
+    /// there, closed channels' included (lnurl-mint's SWEEP_ADDRESS).
+    pub sweep_address: Option<String>,
+    /// Closing every channel, for good (CLOSE_ALL).
+    pub closing: bool,
 }
 
 /// A subdomain-safe name: 3–30 of a-z, 0-9 and inner dashes.
@@ -100,6 +108,25 @@ pub fn check_name(name: &str) -> Result<()> {
 }
 
 impl Platform {
+    /// A sweep address for this network, lowercased: segwit (bech32) or
+    /// taproot (bech32m) only, with a valid checksum. The mint checks it
+    /// again on start, and one it refuses would keep it from starting.
+    pub fn check_sweep_address(&self, address: &str) -> Result<String> {
+        let address = address.trim().to_ascii_lowercase();
+        let hrp = match self.network.as_str() {
+            "bitcoin" | "mainnet" => "bc",
+            "regtest" => "bcrt",
+            _ => "tb",
+        };
+        let (got, _, _) = bech32::segwit::decode(&address)
+            .map_err(|_| anyhow::anyhow!("that isn't a valid bitcoin address: use a bc1… one"))?;
+        ensure!(
+            got.as_str() == hrp,
+            "that address is for another network: this one wants {hrp}1…"
+        );
+        Ok(address)
+    }
+
     pub fn host(&self, mint: &Mint) -> String {
         format!("{}.{}", mint.name, self.domain)
     }
@@ -118,6 +145,8 @@ impl Platform {
                 "network": self.network,
                 "chain": "electrum",
                 "liquidity": {"lsp": if self.lsp_node.is_some() { "lsps2" } else { "none" }},
+                "sweepAddress": mint.sweep_address,
+                "closing": mint.closing,
             }
         })
     }
@@ -159,6 +188,12 @@ impl Platform {
         ];
         if let Some(lsp) = &self.lsp_node {
             env.push(json!({"name": "LSP_NODE", "value": lsp}));
+        }
+        if let Some(address) = &mint.sweep_address {
+            env.push(json!({"name": "SWEEP_ADDRESS", "value": address}));
+        }
+        if mint.closing {
+            env.push(json!({"name": "CLOSE_ALL", "value": "true"}));
         }
         let probe = |delay: u32| {
             json!({
@@ -569,6 +604,19 @@ impl GitOps {
             self.write_mint(dir, mint)
         })
     }
+
+    /// Remove a mint's directory. Argo CD deletes everything of it but its
+    /// volume (`Delete=false`), so a mistake can still be undone by hand.
+    pub fn delete(&self, name: &str) -> Result<Option<String>> {
+        self.repo.commit(&format!("run: delete {name}"), |dir| {
+            let mint_dir = dir.join("mints").join(name);
+            if !mint_dir.exists() {
+                bail!("no mint named {name} in the repository");
+            }
+            std::fs::remove_dir_all(mint_dir)?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +646,8 @@ pub mod tests {
             name: name.into(),
             owner: "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e".into(),
             enabled: true,
+            sweep_address: Some("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into()),
+            closing: false,
         }
     }
 
@@ -658,6 +708,11 @@ pub mod tests {
         assert_eq!(get("LSP_NODE"), Some(json!("02ab@lsp.example:9735")));
         assert_eq!(get("BITCOIND_RPC"), None);
         assert_eq!(
+            get("SWEEP_ADDRESS"),
+            Some(json!("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"))
+        );
+        assert_eq!(get("CLOSE_ALL"), None);
+        assert_eq!(
             ingress["spec"]["rules"][0]["host"],
             "satoshi.run.lnurlcash.com"
         );
@@ -666,6 +721,38 @@ pub mod tests {
             ..mint("satoshi")
         };
         assert_eq!(p.resources(&off)[1]["spec"]["replicas"], 0);
+        let closing = Mint {
+            closing: true,
+            ..mint("satoshi")
+        };
+        let env =
+            p.resources(&closing)[1]["spec"]["template"]["spec"]["containers"][0]["env"].clone();
+        assert!(
+            env.as_array()
+                .unwrap()
+                .contains(&json!({"name": "CLOSE_ALL", "value": "true"}))
+        );
+    }
+
+    #[test]
+    fn sweep_addresses_are_for_the_network() {
+        let p = platform("https://git.example/k8s.git");
+        assert_eq!(
+            p.check_sweep_address(" TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX ")
+                .unwrap(),
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+        );
+        // taproot
+        p.check_sweep_address("tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c")
+            .unwrap();
+        for bad in [
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsy",
+            "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+            "",
+        ] {
+            assert!(p.check_sweep_address(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -750,7 +837,11 @@ pub mod tests {
         assert!(resources.matches("---\n").count() == 3);
         let appset = git(&remote, &["show", "main:argocd/applicationset.yaml"]);
         assert!(appset.contains("exclude: \"mint.yaml\""));
-        let spec = git(&remote, &["show", "main:mints/meetup-zrh/mint.yaml"]);
+        ops.delete("meetup-zrh").unwrap();
+        assert!(ops.delete("meetup-zrh").is_err());
+        let tree = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
+        assert!(!tree.contains("mints/meetup-zrh/"), "{tree}");
+        let spec = git(&remote, &["show", "main~1:mints/meetup-zrh/mint.yaml"]);
         assert!(
             spec.contains("npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"),
             "{spec}"
