@@ -1,14 +1,14 @@
 //! Provisioning by commit. A mint is a directory in a git repository of
-//! Kubernetes configuration:
+//! Kubernetes configuration, which one Argo CD Application syncs as a whole
+//! (path `argocd`, recursive):
 //!
 //! ```text
-//! mints/<name>/mint.yaml        what Run was asked for (not applied)
-//! mints/<name>/resources.yaml   PVC, StatefulSet, Service, Ingress
-//! argocd/applicationset.yaml    one Argo CD Application per mints/* directory
+//! argocd/<name>/resources.yaml  PVC, StatefulSet, Service, Ingress
 //! ```
 //!
-//! A deleted mint's directory is removed: Argo CD deletes its Application
-//! and resources, but never the PVC.
+//! Anything else under `argocd/` (the namespace) is the operator's. A
+//! deleted mint's directory is removed: Argo CD prunes its resources, but
+//! never the PVC.
 //!
 //! Run only commits and pushes; Argo CD makes the cluster match. Manifests
 //! are built as JSON values and written as YAML whose strings are all
@@ -69,9 +69,12 @@ pub struct Platform {
     pub ingress_class: String,
     pub storage: String,
     pub storage_class: Option<String>,
-    /// The git repository Argo CD watches, for the ApplicationSet.
-    pub repo_url: String,
-    pub branch: String,
+    /// The public ports mints' Lightning nodes get, one each; set together
+    /// with `ln_announce_host`.
+    pub ln_ports: Option<std::ops::RangeInclusive<u16>>,
+    /// The public host (the cluster's IP) a mint's Lightning node is
+    /// announced at, with its own port: `<host>:<ln_port>`.
+    pub ln_announce_host: Option<String>,
 }
 
 /// What one mint is.
@@ -86,6 +89,9 @@ pub struct Mint {
     pub sweep_address: Option<String>,
     /// Closing every channel, for good (CLOSE_ALL).
     pub closing: bool,
+    /// The public port the node is reached at: the ingress controller
+    /// forwards it to the Service `ln-<port>`.
+    pub ln_port: Option<u16>,
 }
 
 /// A subdomain-safe name: 3–30 of a-z, 0-9 and inner dashes.
@@ -129,26 +135,6 @@ impl Platform {
 
     pub fn host(&self, mint: &Mint) -> String {
         format!("{}.{}", mint.name, self.domain)
-    }
-
-    /// `mint.yaml`: the request, for people reading the repository.
-    pub fn spec(&self, mint: &Mint) -> Value {
-        json!({
-            "apiVersion": "run.lnurlcash.com/v1",
-            "kind": "Mint",
-            "metadata": {"name": mint.name},
-            "spec": {
-                "owner": crate::nostr::npub(&mint.owner),
-                "enabled": mint.enabled,
-                "image": self.image,
-                "domain": self.host(mint),
-                "network": self.network,
-                "chain": "electrum",
-                "liquidity": {"lsp": if self.lsp_node.is_some() { "lsps2" } else { "none" }},
-                "sweepAddress": mint.sweep_address,
-                "closing": mint.closing,
-            }
-        })
     }
 
     /// The Kubernetes resources one mint runs as.
@@ -195,16 +181,25 @@ impl Platform {
         if mint.closing {
             env.push(json!({"name": "CLOSE_ALL", "value": "true"}));
         }
+        let ln_port = mint.ln_port.zip(self.ln_announce_host.as_ref());
+        if let Some((port, host)) = ln_port {
+            env.push(json!({"name": "LN_ANNOUNCE_ADDRESSES", "value": format!("{host}:{port}")}));
+        }
         let probe = |delay: u32| {
             json!({
                 "httpGet": {"path": "/.well-known/lnurlp/_", "port": 8111},
                 "initialDelaySeconds": delay, "periodSeconds": 20, "timeoutSeconds": 10, "failureThreshold": 6,
             })
         };
+        let mut sts_meta = meta(name.clone());
+        // who asked for it, for people reading the repository
+        sts_meta["annotations"] = json!({
+            "run.lnurlcash.com/owner": crate::nostr::npub(&mint.owner),
+        });
         let statefulset = json!({
             "apiVersion": "apps/v1",
             "kind": "StatefulSet",
-            "metadata": meta(name.clone()),
+            "metadata": sts_meta,
             "spec": {
                 "replicas": if mint.enabled { 1 } else { 0 },
                 "serviceName": name,
@@ -237,9 +232,11 @@ impl Platform {
                             ],
                             "readinessProbe": probe(10),
                             "livenessProbe": probe(120),
+                            // an idle signet mint uses ~20 MiB; the limit is
+                            // headroom, an OOM kill can force-close a channel
                             "resources": {
-                                "requests": {"cpu": "50m", "memory": "128Mi"},
-                                "limits": {"memory": "512Mi"},
+                                "requests": {"cpu": "10m", "memory": "32Mi"},
+                                "limits": {"memory": "256Mi"},
                             },
                             "securityContext": {
                                 "allowPrivilegeEscalation": false,
@@ -288,43 +285,21 @@ impl Platform {
             },
         });
 
-        vec![pvc, statefulset, service, ingress]
-    }
-
-    /// `argocd/applicationset.yaml`: an Application per `mints/*`, applying
-    /// everything there but `mint.yaml`. Automated sync, never pruning: a
-    /// mint goes away by an operator's hand, not by a missing file.
-    pub fn applicationset(&self) -> Value {
-        json!({
-            "apiVersion": "argoproj.io/v1alpha1",
-            "kind": "ApplicationSet",
-            "metadata": {"name": "lnurlcash-run-mints", "namespace": "argocd"},
-            "spec": {
-                "goTemplate": true,
-                "generators": [{"git": {
-                    "repoURL": self.repo_url,
-                    "revision": self.branch,
-                    "directories": [{"path": "mints/*"}],
-                }}],
-                "template": {
-                    "metadata": {"name": "mint-{{.path.basename}}"},
-                    "spec": {
-                        "project": "default",
-                        "source": {
-                            "repoURL": self.repo_url,
-                            "targetRevision": self.branch,
-                            "path": "{{.path.path}}",
-                            "directory": {"exclude": "mint.yaml"},
-                        },
-                        "destination": {"server": "https://kubernetes.default.svc", "namespace": self.namespace},
-                        "syncPolicy": {
-                            "automated": {"prune": false, "selfHeal": true},
-                            "syncOptions": ["CreateNamespace=true"],
-                        },
-                    },
+        let mut resources = vec![pvc, statefulset, service, ingress];
+        // named by its port, so the ingress controller's tcp map is set
+        // once per block of ports, not per mint
+        if let Some((port, _)) = ln_port {
+            resources.push(json!({
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": meta(format!("ln-{port}")),
+                "spec": {
+                    "selector": {"app.kubernetes.io/instance": name},
+                    "ports": [{"name": "lightning", "port": 9735, "targetPort": "lightning"}],
                 },
-            },
-        })
+            }));
+        }
+        resources
     }
 }
 
@@ -551,6 +526,11 @@ fn redact(text: &str) -> String {
 
 // ---- what Run does ----
 
+/// `argocd/<name>/`, the directory Argo CD applies a mint from.
+fn mint_dir(repo: &Path, name: &str) -> PathBuf {
+    repo.join("argocd").join(name)
+}
+
 pub struct GitOps {
     pub platform: Platform,
     pub repo: Repo,
@@ -558,21 +538,11 @@ pub struct GitOps {
 
 impl GitOps {
     fn write_mint(&self, dir: &Path, mint: &Mint) -> Result<()> {
-        let mint_dir = dir.join("mints").join(&mint.name);
+        let mint_dir = mint_dir(dir, &mint.name);
         std::fs::create_dir_all(&mint_dir)?;
-        std::fs::write(
-            mint_dir.join("mint.yaml"),
-            to_yaml(&self.platform.spec(mint)),
-        )?;
         std::fs::write(
             mint_dir.join("resources.yaml"),
             documents(&self.platform.resources(mint)),
-        )?;
-        let argocd = dir.join("argocd");
-        std::fs::create_dir_all(&argocd)?;
-        std::fs::write(
-            argocd.join("applicationset.yaml"),
-            to_yaml(&self.platform.applicationset()),
         )?;
         Ok(())
     }
@@ -586,7 +556,7 @@ impl GitOps {
             crate::nostr::npub(&mint.owner)
         );
         self.repo.commit(&message, |dir| {
-            if dir.join("mints").join(&mint.name).exists() {
+            if mint_dir(dir, &mint.name).exists() {
                 bail!("a mint named {} exists already", mint.name);
             }
             self.write_mint(dir, mint)
@@ -598,18 +568,18 @@ impl GitOps {
     pub fn update(&self, mint: &Mint, why: &str) -> Result<Option<String>> {
         let message = format!("run: {why} {}", mint.name);
         self.repo.commit(&message, |dir| {
-            if !dir.join("mints").join(&mint.name).exists() {
+            if !mint_dir(dir, &mint.name).exists() {
                 bail!("no mint named {} in the repository", mint.name);
             }
             self.write_mint(dir, mint)
         })
     }
 
-    /// Remove a mint's directory. Argo CD deletes everything of it but its
-    /// volume (`Delete=false`), so a mistake can still be undone by hand.
+    /// Remove a mint's directory. Argo CD prunes everything of it but its
+    /// volume (`Prune=false`), so a mistake can still be undone by hand.
     pub fn delete(&self, name: &str) -> Result<Option<String>> {
         self.repo.commit(&format!("run: delete {name}"), |dir| {
-            let mint_dir = dir.join("mints").join(name);
+            let mint_dir = mint_dir(dir, name);
             if !mint_dir.exists() {
                 bail!("no mint named {name} in the repository");
             }
@@ -623,7 +593,7 @@ impl GitOps {
 pub mod tests {
     use super::*;
 
-    pub fn platform(repo_url: &str) -> Platform {
+    pub fn platform() -> Platform {
         Platform {
             image: "lnurlcash/lnurl-mint-rust:0.1.0".into(),
             domain: "run.lnurlcash.com".into(),
@@ -636,8 +606,8 @@ pub mod tests {
             ingress_class: "nginx".into(),
             storage: "2Gi".into(),
             storage_class: None,
-            repo_url: repo_url.into(),
-            branch: "main".into(),
+            ln_ports: Some(9800..=9809),
+            ln_announce_host: Some("129.212.193.228".into()),
         }
     }
 
@@ -648,7 +618,38 @@ pub mod tests {
             enabled: true,
             sweep_address: Some("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into()),
             closing: false,
+            ln_port: None,
         }
+    }
+
+    #[test]
+    fn lightning_is_announced_at_its_port() {
+        let p = platform();
+        let mint = Mint {
+            ln_port: Some(9801),
+            ..mint("satoshi")
+        };
+        let [_pvc, sts, _svc, _ingress, ln] = <[Value; 5]>::try_from(p.resources(&mint)).unwrap();
+        assert!(
+            sts["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .contains(
+                    &json!({"name": "LN_ANNOUNCE_ADDRESSES", "value": "129.212.193.228:9801"})
+                )
+        );
+        assert_eq!(ln["metadata"]["name"], "ln-9801");
+        assert_eq!(
+            ln["spec"]["selector"]["app.kubernetes.io/instance"],
+            "satoshi"
+        );
+        assert_eq!(ln["spec"]["ports"][0]["port"], 9735);
+        // no host to announce: neither
+        let quiet = Platform {
+            ln_announce_host: None,
+            ..platform()
+        };
+        assert_eq!(quiet.resources(&mint).len(), 4);
     }
 
     #[test]
@@ -681,7 +682,7 @@ pub mod tests {
 
     #[test]
     fn resources_carry_the_platform() {
-        let p = platform("https://git.example/k8s.git");
+        let p = platform();
         let [pvc, sts, _svc, ingress] =
             <[Value; 4]>::try_from(p.resources(&mint("satoshi"))).unwrap();
         assert_eq!(
@@ -736,7 +737,7 @@ pub mod tests {
 
     #[test]
     fn sweep_addresses_are_for_the_network() {
-        let p = platform("https://git.example/k8s.git");
+        let p = platform();
         assert_eq!(
             p.check_sweep_address(" TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX ")
                 .unwrap(),
@@ -779,7 +780,7 @@ pub mod tests {
         git(&remote, &["init", "-q", "--bare", "-b", "main"]);
         let url = remote.to_string_lossy().into_owned();
         let ops = GitOps {
-            platform: platform(&url),
+            platform: platform(),
             repo: Repo::new(tmp.join("clone"), url.clone(), "main".into()),
         };
 
@@ -832,19 +833,27 @@ pub mod tests {
         );
         assert_eq!(subjects[1], "lnurlcash-run|run: disable satoshi");
         assert_eq!(subjects[2], "t|docs");
-        let resources = git(&remote, &["show", "main:mints/satoshi/resources.yaml"]);
+        let resources = git(&remote, &["show", "main:argocd/satoshi/resources.yaml"]);
         assert!(resources.contains("replicas: 0"), "{resources}");
         assert!(resources.matches("---\n").count() == 3);
-        let appset = git(&remote, &["show", "main:argocd/applicationset.yaml"]);
-        assert!(appset.contains("exclude: \"mint.yaml\""));
         ops.delete("meetup-zrh").unwrap();
         assert!(ops.delete("meetup-zrh").is_err());
         let tree = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
-        assert!(!tree.contains("mints/meetup-zrh/"), "{tree}");
-        let spec = git(&remote, &["show", "main~1:mints/meetup-zrh/mint.yaml"]);
+        assert_eq!(
+            tree.lines().filter(|f| f.starts_with("argocd/")).count(),
+            1,
+            "{tree}"
+        );
+        assert!(!tree.contains("argocd/meetup-zrh/"), "{tree}");
+        let deleted = git(
+            &remote,
+            &["show", "main~1:argocd/meetup-zrh/resources.yaml"],
+        );
         assert!(
-            spec.contains("npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"),
-            "{spec}"
+            deleted.contains(
+                "run.lnurlcash.com/owner: \"npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg\""
+            ),
+            "{deleted}"
         );
         std::fs::remove_dir_all(&tmp).unwrap();
     }

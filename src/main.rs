@@ -59,10 +59,6 @@ struct GitOpsArgs {
     /// credential setup; it never appears in logs.
     #[arg(long, env = "GITOPS_REPO", hide_env_values = true)]
     gitops_repo: Option<String>,
-    /// The URL Argo CD reads the repository at (default: GITOPS_REPO
-    /// without credentials).
-    #[arg(long, env = "GITOPS_ARGO_URL")]
-    gitops_argo_url: Option<String>,
     #[arg(long, env = "GITOPS_BRANCH", default_value = "main")]
     gitops_branch: String,
     /// Where the clone lives (default: <DATA_DIR>/gitops).
@@ -78,7 +74,7 @@ struct GitOpsArgs {
     /// Mints live at <name>.<MINT_DOMAIN>.
     #[arg(long, env = "MINT_DOMAIN", default_value = "run.lnurlcash.com")]
     mint_domain: String,
-    #[arg(long, env = "MINT_NAMESPACE", default_value = "lnurlcash-mints")]
+    #[arg(long, env = "MINT_NAMESPACE", default_value = "lnurlcash")]
     mint_namespace: String,
     #[arg(long, env = "MINT_NETWORK", default_value = "bitcoin")]
     mint_network: String,
@@ -92,7 +88,7 @@ struct GitOpsArgs {
     /// The LSPS2 provider mints get inbound liquidity from, pubkey@host:port.
     #[arg(long, env = "MINT_LSP_NODE")]
     mint_lsp_node: Option<String>,
-    #[arg(long, env = "MINT_CERT_ISSUER", default_value = "letsencrypt")]
+    #[arg(long, env = "MINT_CERT_ISSUER", default_value = "letsencrypt-prod")]
     mint_cert_issuer: String,
     /// A wildcard certificate's secret for *.<MINT_DOMAIN>, instead of one
     /// certificate per mint.
@@ -104,19 +100,29 @@ struct GitOpsArgs {
     mint_storage: String,
     #[arg(long, env = "MINT_STORAGE_CLASS")]
     mint_storage_class: Option<String>,
+    /// Public ports for the mints' Lightning nodes, one each, e.g.
+    /// 9800-9809. The ingress controller forwards each to `ln-<port>`.
+    #[arg(long, env = "MINT_LN_PORTS", value_parser = parse_ports)]
+    mint_ln_ports: Option<std::ops::RangeInclusive<u16>>,
+    /// The public host (the cluster's IP) the nodes are announced at.
+    #[arg(long, env = "MINT_LN_ANNOUNCE_HOST")]
+    mint_ln_announce_host: Option<String>,
     /// Mints one approved member may have.
     #[arg(long, env = "MINTS_PER_MEMBER", default_value_t = 1)]
     mints_per_member: usize,
 }
 
 impl GitOpsArgs {
-    fn build(&self, data_dir: &std::path::Path) -> Option<gitops::GitOps> {
-        let url = self.gitops_repo.clone()?;
-        let argo_url = self
-            .gitops_argo_url
-            .clone()
-            .unwrap_or_else(|| strip_credentials(&url));
-        Some(gitops::GitOps {
+    fn build(&self, data_dir: &std::path::Path) -> anyhow::Result<Option<gitops::GitOps>> {
+        let Some(url) = self.gitops_repo.clone() else {
+            return Ok(None);
+        };
+        let host = self.mint_ln_announce_host.clone().filter(|h| !h.is_empty());
+        anyhow::ensure!(
+            self.mint_ln_ports.is_some() == host.is_some(),
+            "set both MINT_LN_PORTS and MINT_LN_ANNOUNCE_HOST, or neither"
+        );
+        Ok(Some(gitops::GitOps {
             platform: gitops::Platform {
                 image: self.mint_image.clone(),
                 domain: self.mint_domain.clone(),
@@ -129,8 +135,8 @@ impl GitOpsArgs {
                 ingress_class: self.mint_ingress_class.clone(),
                 storage: self.mint_storage.clone(),
                 storage_class: self.mint_storage_class.clone().filter(|c| !c.is_empty()),
-                repo_url: argo_url,
-                branch: self.gitops_branch.clone(),
+                ln_ports: self.mint_ln_ports.clone(),
+                ln_announce_host: host,
             },
             repo: gitops::Repo::new(
                 self.gitops_dir
@@ -139,8 +145,23 @@ impl GitOpsArgs {
                 url,
                 self.gitops_branch.clone(),
             ),
-        })
+        }))
     }
+}
+
+/// `9800-9809` → 9800..=9809.
+fn parse_ports(s: &str) -> Result<std::ops::RangeInclusive<u16>, String> {
+    let (first, last) = s.split_once('-').unwrap_or((s, s));
+    let port = |p: &str| {
+        p.trim()
+            .parse::<u16>()
+            .map_err(|_| format!("not a port: {p}"))
+    };
+    let (first, last) = (port(first)?, port(last)?);
+    if first == 0 || first > last {
+        return Err(format!("not a range of ports: {s}"));
+    }
+    Ok(first..=last)
 }
 
 /// `https://user:token@host/x` → `https://host/x`.
@@ -224,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
     let store = db::Store::open(&path.to_string_lossy())
         .with_context(|| format!("could not open {}", path.display()))?;
 
-    let gitops = config.gitops.build(&config.data_dir);
+    let gitops = config.gitops.build(&config.data_dir)?;
     if let Some(command) = config.command {
         return operator(command, &store, gitops.as_ref());
     }
@@ -232,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
     match &gitops {
         Some(g) => log::info!(
             "provisioning into {} ({}), mints at *.{}",
-            g.platform.repo_url,
+            strip_credentials(config.gitops.gitops_repo.as_deref().unwrap_or_default()),
             g.platform.namespace,
             g.platform.domain
         ),
@@ -452,15 +473,21 @@ fn live_mints(
         .collect())
 }
 
-/// What a stored mint is rendered from.
-fn mint_of(m: &db::MintRow) -> gitops::Mint {
-    gitops::Mint {
+/// What a stored mint is rendered from. With MINT_LN_PORTS set, a mint
+/// that has no Lightning port yet (made before them) is given one.
+fn mint_of(store: &db::Store, g: &gitops::GitOps, m: &db::MintRow) -> anyhow::Result<gitops::Mint> {
+    let ln_port = match &g.platform.ln_ports {
+        Some(ports) => Some(store.ln_port(&m.name, ports.clone())?),
+        None => m.ln_port,
+    };
+    Ok(gitops::Mint {
         name: m.name.clone(),
         owner: m.owner.clone(),
         enabled: m.enabled,
         sweep_address: m.sweep_address.clone(),
         closing: m.closing,
-    }
+        ln_port,
+    })
 }
 
 fn mint_json(g: &gitops::GitOps, m: &db::MintRow) -> Value {
@@ -549,6 +576,21 @@ async fn create_mint(
     {
         return Err(refuse(StatusCode::CONFLICT, "that name is taken"));
     }
+    let ports = state
+        .gitops
+        .as_ref()
+        .and_then(|g| g.platform.ln_ports.clone());
+    let ln_port = match ports.map(|p| state.store.ln_port(&name, p)).transpose() {
+        Ok(port) => port,
+        Err(e) => {
+            let _ = state.store.release_mint(&name);
+            log::error!("provisioning {name}: {e:#}");
+            return Err(refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "there's no room for another mint right now",
+            ));
+        }
+    };
     let worker = Arc::clone(&state);
     let mint = gitops::Mint {
         name: name.clone(),
@@ -556,6 +598,7 @@ async fn create_mint(
         enabled: true,
         sweep_address: Some(sweep_address),
         closing: false,
+        ln_port,
     };
     let committed =
         tokio::task::spawn_blocking(move || worker.gitops.as_ref().map(|g| g.provision(&mint)))
@@ -649,12 +692,13 @@ async fn close_mint(
             )
         })?,
     };
+    let g = state.gitops.as_ref().expect("checked by own_mint");
     let mint = gitops::Mint {
         sweep_address: Some(address.clone()),
         closing: true,
         // a disabled mint can't close its channels
         enabled: true,
-        ..mint_of(&row)
+        ..mint_of(&state.store, g, &row).map_err(internal)?
     };
     let worker = Arc::clone(&state);
     let committed = tokio::task::spawn_blocking(move || {
@@ -782,7 +826,7 @@ fn operator(
                 println!(
                     "{}",
                     json!({"name": m.name, "owner": nostr::npub(&m.owner), "enabled": m.enabled, "commit": m.commit_id,
-                           "sweep_address": m.sweep_address, "closing": m.closing, "deleted_at": m.deleted_at})
+                           "sweep_address": m.sweep_address, "closing": m.closing, "deleted_at": m.deleted_at, "ln_port": m.ln_port})
                 );
             }
         }
@@ -801,12 +845,21 @@ fn operator(
                 store.claim_mint(&name, &owner, sweep_address.as_deref(), now())?,
                 "{name} is taken"
             );
+            let ports = g.platform.ln_ports.clone();
+            let ln_port = match ports.map(|p| store.ln_port(&name, p)).transpose() {
+                Ok(port) => port,
+                Err(e) => {
+                    store.release_mint(&name)?;
+                    return Err(e);
+                }
+            };
             match g.provision(&gitops::Mint {
                 name: name.clone(),
                 owner,
                 enabled: true,
                 sweep_address,
                 closing: false,
+                ln_port,
             }) {
                 Ok(commit) => {
                     let commit = commit.unwrap_or_default();
@@ -843,7 +896,7 @@ fn operator(
                 sweep_address: Some(address.clone()),
                 closing: true,
                 enabled: true,
-                ..mint_of(&m)
+                ..mint_of(store, g, &m)?
             };
             let commit = g
                 .update(&mint, "close")?
@@ -867,7 +920,7 @@ fn operator(
                 .into_iter()
                 .filter(|m| m.deleted_at.is_none())
             {
-                match g.update(&mint_of(&m), "re-render")? {
+                match g.update(&mint_of(store, g, &m)?, "re-render")? {
                     Some(commit) => {
                         store.mint_committed(&m.name, &commit, m.enabled)?;
                         println!("{}: {commit}", m.name);
@@ -891,7 +944,7 @@ fn set_enabled(
         .ok_or_else(|| anyhow::anyhow!("no mint named {name}"))?;
     let mint = gitops::Mint {
         enabled,
-        ..mint_of(&m)
+        ..mint_of(store, g, &m)?
     };
     let commit = g.update(&mint, if enabled { "enable" } else { "disable" })?;
     let commit = commit.or(m.commit_id).unwrap_or_default();
@@ -999,7 +1052,7 @@ mod tests {
             store,
             public_url: "https://run.lnurlcash.com".into(),
             gitops: Some(gitops::GitOps {
-                platform: gitops::tests::platform(&url),
+                platform: gitops::tests::platform(),
                 repo: gitops::Repo::new(tmp.join("clone"), url.clone(), "main".into()),
             }),
             mints_per_member: 1,
@@ -1139,7 +1192,7 @@ mod tests {
             "https://satoshi.run.lnurlcash.com/closing"
         );
         let resources = std::process::Command::new("git")
-            .args(["show", "main:mints/satoshi/resources.yaml"])
+            .args(["show", "main:argocd/satoshi/resources.yaml"])
             .current_dir(&remote)
             .output()
             .unwrap();

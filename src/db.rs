@@ -1,8 +1,8 @@
 //! The beta list: one row per nostr pubkey.
 
-use std::sync::Mutex;
+use std::{ops::RangeInclusive, sync::Mutex};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::{Connection, params};
 
 pub struct Store(Mutex<Connection>);
@@ -64,6 +64,16 @@ impl Store {
                 "ALTER TABLE mints ADD COLUMN sweep_address TEXT;
                  ALTER TABLE mints ADD COLUMN closing INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE mints ADD COLUMN deleted_at INTEGER;",
+            )?;
+        }
+        // the public port its Lightning node is reached and announced at
+        let has_ln_port: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('mints') WHERE name = 'ln_port'")?
+            .exists([])?;
+        if !has_ln_port {
+            conn.execute_batch(
+                "ALTER TABLE mints ADD COLUMN ln_port INTEGER;
+                 CREATE UNIQUE INDEX mints_ln_port ON mints (ln_port);",
             )?;
         }
         Ok(Store(Mutex::new(conn)))
@@ -160,6 +170,38 @@ impl Store {
         Ok(())
     }
 
+    /// `name`'s Lightning port: the one it has, or the lowest in `ports`
+    /// no mint has, deleted ones included (peers may still dial a deleted
+    /// mint's announced address). Errors when every port is taken.
+    pub fn ln_port(&self, name: &str, ports: RangeInclusive<u16>) -> Result<u16> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn();
+        let current: Option<Option<u16>> = conn
+            .query_row("SELECT ln_port FROM mints WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(current) = current else {
+            bail!("no mint named {name}");
+        };
+        if let Some(port) = current {
+            return Ok(port);
+        }
+        let taken: Vec<u16> = conn
+            .prepare("SELECT ln_port FROM mints WHERE ln_port IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let (first, last) = (*ports.start(), *ports.end());
+        let Some(port) = ports.into_iter().find(|p| !taken.contains(p)) else {
+            bail!("every Lightning port ({first}-{last}) is taken");
+        };
+        conn.execute(
+            "UPDATE mints SET ln_port = ?2 WHERE name = ?1",
+            params![name, port],
+        )?;
+        Ok(port)
+    }
+
     /// A claim whose commit failed: give the name back.
     pub fn release_mint(&self, name: &str) -> Result<()> {
         self.conn().execute(
@@ -182,7 +224,7 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT name, owner, enabled, commit_id, created_at, sweep_address, closing, deleted_at FROM mints WHERE name = ?1",
+                "SELECT name, owner, enabled, commit_id, created_at, sweep_address, closing, deleted_at, ln_port FROM mints WHERE name = ?1",
                 [name],
                 mint_row,
             )
@@ -193,7 +235,7 @@ impl Store {
     pub fn mints(&self, owner: Option<&str>) -> Result<Vec<MintRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT name, owner, enabled, commit_id, created_at, sweep_address, closing, deleted_at FROM mints
+            "SELECT name, owner, enabled, commit_id, created_at, sweep_address, closing, deleted_at, ln_port FROM mints
              WHERE ?1 IS NULL OR owner = ?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -244,6 +286,7 @@ pub struct MintRow {
     /// Closing every channel, for good.
     pub closing: bool,
     pub deleted_at: Option<u64>,
+    pub ln_port: Option<u16>,
 }
 
 fn mint_row(r: &rusqlite::Row) -> rusqlite::Result<MintRow> {
@@ -256,6 +299,7 @@ fn mint_row(r: &rusqlite::Row) -> rusqlite::Result<MintRow> {
         sweep_address: r.get(5)?,
         closing: r.get(6)?,
         deleted_at: r.get::<_, Option<i64>>(7)?.map(|t| t as u64),
+        ln_port: r.get(8)?,
     })
 }
 
@@ -333,5 +377,24 @@ mod tests {
         assert!(m.closing && !m.enabled && m.deleted_at == Some(9));
         // a deleted mint's name stays taken
         assert!(!store.claim_mint("satoshi", "aa", None, 10).unwrap());
+    }
+
+    #[test]
+    fn lightning_ports_are_unique_and_kept() {
+        let store = Store::in_memory().unwrap();
+        for (i, name) in ["satoshi", "hal", "nick"].iter().enumerate() {
+            assert!(store.claim_mint(name, "aa", None, i as u64).unwrap());
+        }
+        assert_eq!(store.ln_port("satoshi", 9800..=9801).unwrap(), 9800);
+        assert_eq!(store.ln_port("satoshi", 9800..=9801).unwrap(), 9800, "kept");
+        // a deleted mint keeps its port: peers may still dial it
+        store.mint_deleted("satoshi", "a3f9c1e", 5).unwrap();
+        assert_eq!(store.ln_port("hal", 9800..=9801).unwrap(), 9801);
+        let full = store.ln_port("nick", 9800..=9801).unwrap_err();
+        assert!(full.to_string().contains("9800-9801"), "{full}");
+        // a wider range later: the next one free
+        assert_eq!(store.ln_port("nick", 9800..=9809).unwrap(), 9802);
+        assert_eq!(store.mint("hal").unwrap().unwrap().ln_port, Some(9801));
+        assert!(store.ln_port("nobody", 9800..=9809).is_err());
     }
 }

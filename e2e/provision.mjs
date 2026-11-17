@@ -89,7 +89,7 @@ await page.click('.mint-card button:has-text("Close mint")');
 await page.click('.mint-card button:has-text("Close every channel")');
 await page.waitForSelector('.mint-card :text("1 channel open")');
 assert.ok(await page.locator('.mint-card button:has-text("Delete mint")').isDisabled(), 'no delete before drained');
-let spec = execFileSync('git', ['show', 'main:mints/satoshi/resources.yaml'], {cwd: remote}).toString();
+let spec = execFileSync('git', ['show', 'main:argocd/satoshi/resources.yaml'], {cwd: remote}).toString();
 assert.match(spec, /"CLOSE_ALL"/);
 assert.ok(spec.includes(sweep));
 console.log('closing: CLOSE_ALL committed, delete waits');
@@ -103,7 +103,7 @@ await page.click('.mint-card button:has-text("Delete mint")');
 await page.click('.mint-card button:has-text("Delete it for good")');
 await page.waitForSelector(':text("satoshi is deleted.")');
 spec = execFileSync('git', ['ls-tree', '-r', '--name-only', 'main'], {cwd: remote}).toString();
-assert.ok(!spec.includes('mints/satoshi/'), spec);
+assert.ok(!spec.includes('argocd/satoshi/'), spec);
 console.log('drained: deleted');
 
 const log = execFileSync('git', ['log', '--format=%an|%s', 'main'], {cwd: remote}).toString().trim();

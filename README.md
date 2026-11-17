@@ -72,18 +72,20 @@ never talks to the cluster. It changes a git repository of Kubernetes
 configuration, and Argo CD makes the cluster match (`src/gitops.rs`):
 
 ```text
-mints/<name>/mint.yaml        what was asked for: owner, image, domain (not applied)
-mints/<name>/resources.yaml   PersistentVolumeClaim, StatefulSet, Service, Ingress
-argocd/applicationset.yaml    one Argo CD Application per mints/* directory
+argocd/<name>/resources.yaml  PersistentVolumeClaim, StatefulSet, Service, Ingress
 ```
+
+One Argo CD Application syncs `argocd/` as a whole (recursive, with prune),
+like the TYPO3 sites. Anything else in there, such as the namespace, is the
+operator's. The owner's npub is the StatefulSet's `run.lnurlcash.com/owner`
+annotation.
 
 Each change is one commit by `lnurlcash-run`, then `fetch` + `reset` onto the
 remote and a push. A push that loses a race is retried once on the new remote
 state, so commits made by hand in between are kept. Operations are
 serialized. Manifests are built as JSON values and written as YAML with every
 value double-quoted (JSON escaping), so a name can't break out of a field.
-They pass `kubeconform -strict` against Kubernetes 1.31, ApplicationSet
-included.
+They pass `kubeconform -strict` against Kubernetes 1.31.
 
 A mint runs `lnurlcash/lnurl-mint-rust` with these settings:
 * `ELECTRUM_URL` set to the shared electrs (no bitcoind credentials anywhere),
@@ -95,6 +97,27 @@ A mint runs `lnurlcash/lnurl-mint-rust` with these settings:
 * Non-root (uid 1000) with a read-only root filesystem and all capabilities
   dropped. `/tmp` is an emptyDir.
 * A 90 s grace period, so SIGTERM can write the channel state.
+* Its own public Lightning port (below), announced as
+  `LN_ANNOUNCE_ADDRESSES=<MINT_LN_ANNOUNCE_HOST>:<port>`. Without it the node
+  shows its listen address, `0.0.0.0:9735`, as the one to connect to.
+
+**Lightning ports.** Every mint is reached on the cluster's IP at a port of
+its own, from `MINT_LN_PORTS`. Run gives each mint the lowest free one and
+adds a Service `ln-<port>` to its directory. The ingress controller forwards
+each port to the Service of that name, so its tcp map changes once per block
+of ports, not per mint:
+
+```yaml
+tcp:                              # ingress-nginx helm values
+  "9800": lnurlcash/ln-9800:9735
+  "9801": lnurlcash/ln-9801:9735
+```
+
+A deleted mint keeps its port, as it keeps its name: peers may still dial
+its announced address. A full range refuses new mints until it grows. Mints
+made before ports get one on their next render (`rerender`). Each port is a
+forwarding rule on the cloud load balancer, and DigitalOcean allows 40 per
+load balancer.
 
 This exact container shape has been run against regtest bitcoind and electrs:
 it syncs, gets funded and stops cleanly.
@@ -131,7 +154,7 @@ page then polls the mint's own `GET https://<name>.<MINT_DOMAIN>/closing`,
 which the CSP allows, and offers **Delete mint** once it reports `drained`:
 nothing left in channels, in sweeps from closed ones or in the wallet. A
 force-close can take up to two weeks to get there. Deleting removes
-`mints/<name>/`; Argo CD deletes the mint's resources but never its PVC, so
+`argocd/<name>/`; Argo CD prunes the mint's resources but never its PVC, so
 an early delete can be undone by restoring the directory. Run doesn't check
 `drained` itself, since it never talks to the mints. A deleted mint's name
 stays taken, because its volume and seed are still there. Removing the PVC
@@ -146,25 +169,28 @@ both and sweeps nothing.
 1. Create the GitOps repository.
 2. Give Run push access, as a token in `GITOPS_REPO` or through git's
    credential config. Errors redact credentials in URLs.
-3. After the first provision, `kubectl apply -f argocd/applicationset.yaml`
-   from it.
+3. Create one Argo CD Application for it: path `argocd`, recursive,
+   automated sync with prune and self-heal. Prune is what takes a deleted
+   mint down; its PVC is annotated `Prune=false`. Annotate a hand-made
+   namespace manifest the same way, so a bad commit can't delete it.
 
 | Variable | Default | |
 |---|---|---|
 | `GITOPS_REPO` | (provisioning off) | The repository to push to. |
-| `GITOPS_ARGO_URL` | `GITOPS_REPO` without credentials | The URL Argo CD reads it at. |
 | `GITOPS_BRANCH` | `main` | |
 | `GITOPS_DIR` | `<DATA_DIR>/gitops` | Run's clone. |
 | `MINT_IMAGE` | `lnurlcash/lnurl-mint-rust:latest` | Pin a version in production. |
 | `MINT_DOMAIN` | `run.lnurlcash.com` | Mints live at `<name>.<MINT_DOMAIN>`. |
-| `MINT_NAMESPACE` | `lnurlcash-mints` | |
+| `MINT_NAMESPACE` | `lnurlcash` | |
 | `MINT_NETWORK` | `bitcoin` | |
 | `MINT_ELECTRUM_URL` | `tcp://electrs.bitcoin.svc.cluster.local:50001` | The shared electrs. |
 | `MINT_LSP_NODE` | none | The LSPS2 provider, `pubkey@host:port`. |
-| `MINT_CERT_ISSUER` | `letsencrypt` | A cert-manager ClusterIssuer, used for one certificate per mint… |
+| `MINT_CERT_ISSUER` | `letsencrypt-prod` | A cert-manager ClusterIssuer, used for one certificate per mint… |
 | `MINT_TLS_SECRET` | none | …or a wildcard certificate's secret for `*.<MINT_DOMAIN>`. |
 | `MINT_INGRESS_CLASS` | `nginx` | |
 | `MINT_STORAGE`, `MINT_STORAGE_CLASS` | `2Gi`, cluster default | |
+| `MINT_LN_PORTS` | none | Public Lightning ports, one per mint, e.g. `9800-9819`… |
+| `MINT_LN_ANNOUNCE_HOST` | none | …and the host they're announced at, the cluster's IP. Both or neither. |
 | `MINTS_PER_MEMBER` | `1` | |
 
 ## Not built yet
