@@ -103,14 +103,21 @@ A mint runs `lnurlcash/lnurl-mint-rust` with these settings:
 
 **Lightning ports.** Every mint is reached on the cluster's IP at a port of
 its own, from `MINT_LN_PORTS`. Run gives each mint the lowest free one and
-adds a Service `ln-<port>` to its directory. The ingress controller forwards
-each port to the Service of that name, so its tcp map changes once per block
-of ports, not per mint:
+adds a Service `ln-<port>` to its directory. The ingress controller (Traefik)
+forwards each port to the Service of that name, so its config changes once per
+block of ports, not per mint: an entrypoint per port in
+`../dni-argo/helm/traefik-values.yml` and an `IngressRouteTCP` in
+`../dni-argo/kubernetes/traefik/tcp-udp-routes.yml`:
 
 ```yaml
-tcp:                              # ingress-nginx helm values
-  "9800": lnurlcash/ln-9800:9735
-  "9801": lnurlcash/ln-9801:9735
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata: { name: mint9800, namespace: dni }
+spec:
+  entryPoints: [mint9800]
+  routes:
+    - match: HostSNI(`*`)
+      services: [{ name: ln-9800, namespace: lnurlcash, port: 9735 }]
 ```
 
 A deleted mint keeps its port, as it keeps its name: peers may still dial
@@ -187,7 +194,7 @@ both and sweeps nothing.
 | `MINT_LSP_NODE` | none | The LSPS2 provider, `pubkey@host:port`. |
 | `MINT_CERT_ISSUER` | `letsencrypt-prod` | A cert-manager ClusterIssuer, used for one certificate per mint… |
 | `MINT_TLS_SECRET` | none | …or a wildcard certificate's secret for `*.<MINT_DOMAIN>`. |
-| `MINT_INGRESS_CLASS` | `nginx` | |
+| `MINT_INGRESS_CLASS` | `traefik` | |
 | `MINT_STORAGE`, `MINT_STORAGE_CLASS` | `2Gi`, cluster default | |
 | `MINT_LN_PORTS` | none | Public Lightning ports, one per mint, e.g. `9800-9819`… |
 | `MINT_LN_ANNOUNCE_HOST` | none | …and the host they're announced at, the cluster's IP. Both or neither. |

@@ -94,7 +94,7 @@ struct GitOpsArgs {
     /// certificate per mint.
     #[arg(long, env = "MINT_TLS_SECRET")]
     mint_tls_secret: Option<String>,
-    #[arg(long, env = "MINT_INGRESS_CLASS", default_value = "nginx")]
+    #[arg(long, env = "MINT_INGRESS_CLASS", default_value = "traefik")]
     mint_ingress_class: String,
     #[arg(long, env = "MINT_STORAGE", default_value = "2Gi")]
     mint_storage: String,

@@ -603,7 +603,7 @@ pub mod tests {
             lsp_node: Some("02ab@lsp.example:9735".into()),
             cert_issuer: "letsencrypt".into(),
             tls_secret: None,
-            ingress_class: "nginx".into(),
+            ingress_class: "traefik".into(),
             storage: "2Gi".into(),
             storage_class: None,
             ln_ports: Some(9800..=9809),
